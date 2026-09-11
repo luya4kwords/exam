@@ -1082,6 +1082,7 @@
             document.getElementById('screen-student-select').classList.remove('hidden');
 
             await renderUnits();
+            await showStudentReminder();
         } else {
             inputEl.value = '';
             inputEl.placeholder = "Not a LUYA Student";
@@ -1266,6 +1267,26 @@
             alert(`${fileStatus}❌ 無法將單元開關狀態儲存至 Firestore：examUnits/${key}。\n${error.message}\n請檢查 Firebase 身分驗證與 Firestore Security Rules 是否允許管理員寫入此文件。狀態尚未變更，学生端無法取得本次設定。`);
             button.disabled=false;
         }
+    }
+    function studentReminderMessage() {
+        if(isAdmin || !unitStatesLoaded || !unitRecordsLoaded) return '';
+        let corrections=false, missed=false;
+        const today=getFormattedDate();
+        for(let book=1;book<=6;book++) for(let unit=1;unit<=30;unit++) {
+            const key=unitKey(book,unit), state=unitStates[key];
+            if(!isDue(state) || !classCanAccess(state,currentUserHR)) continue;
+            const records=unitRecords.filter(r=>isMine(r) && (r.unitId===key || (Number(r.book)===book && Number(r.unit)===unit)));
+            if(records.some(r=>recordDetails(r).some(d=>!d.isCorrect))) corrections=true;
+            if(state.openedDate<today && !records.length) missed=true;
+        }
+        return corrections && missed ? 'You have corrections and missed tests to complete. Please correct your mistakes and take any tests you missed.'
+            : corrections ? 'You have mistakes to correct. Please complete your corrections.'
+            : missed ? 'You have missed a test. Please take the test.' : '';
+    }
+    async function showStudentReminder() {
+        const message=studentReminderMessage();
+        if(message && !document.getElementById('screen-student-select').classList.contains('hidden'))
+            await confirmDatabaseWarning(message,'⚠️ Reminder',true);
     }
     let openingStudentUnit=false;
     async function openStudentUnit(book,unit) {
@@ -2682,13 +2703,14 @@ window.exportWeeklyWord=async button=>{
             restoreNote:'Application JSON backup. Restore with a compatible import tool; not a Firebase managed-export file.'};
     }
     let databaseWarningPending=false;
-    function confirmDatabaseWarning(message, title='⚠️ Warning') {
+    function confirmDatabaseWarning(message, title='⚠️ Warning', noticeOnly=false) {
         if(databaseWarningPending) return Promise.resolve(false);
         databaseWarningPending=true;
         const modal=document.getElementById('modal-database-warning');
         document.getElementById('database-warning-title').textContent=title;
         const cancel=document.getElementById('database-warning-cancel');
         const ok=document.getElementById('database-warning-ok');
+        cancel.classList.toggle('hidden',noticeOnly);
         const previousFocus=document.activeElement;
         document.getElementById('database-warning-message').textContent=message.replace(/^⚠️ Warning: /,'');
         modal.classList.remove('hidden');
@@ -2705,13 +2727,13 @@ window.exportWeeklyWord=async button=>{
                 if(event.key==='Escape') {event.preventDefault();finish(false);}
                 if(event.key==='Tab') {
                     event.preventDefault();
-                    (document.activeElement===cancel ? ok : cancel).focus();
+                    (noticeOnly || document.activeElement===cancel ? ok : cancel).focus();
                 }
             }
             cancel.onclick=()=>finish(false);
             ok.onclick=()=>finish(true);
             modal.addEventListener('keydown',onKey);
-            cancel.focus();
+            (noticeOnly ? ok : cancel).focus();
         });
     }
     async function backupDatabase() {
