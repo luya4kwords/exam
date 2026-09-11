@@ -1196,7 +1196,14 @@
                 const card=document.createElement('div');card.className='unit-card'+(book===selectedBook && unit===selectedUnit ? ' selected':'');
                 card.innerHTML=`<div class="unit-heading"><button class="unit-name ${displayOpen ? 'open':''}">${icon}Unit${String(unit).padStart(2,'0')}</button>${isAdmin ? `<button class="unit-switch" role="switch" aria-label="${unitLabel(book,unit)}" aria-checked="${state.isOpen===true}">${state.isOpen ? 'On':'Off'}</button>` : ''}</div><div class="unit-date"></div>`;
                 card.querySelector('.unit-date').textContent=displayOpen && typeof state.openedDate === 'string' ? state.openedDate.replaceAll('-','.') : '';
-                card.onclick=()=> {selectedBook=book;selectedUnit=unit;drawUnits();if(isAdmin){void loadAdminStudentRecords();}else checkStudentUnitExam();};
+                card.onclick=()=> {
+                    selectedBook=book;selectedUnit=unit;
+                    // Keep the clicked element alive so the browser can detect a double click.
+                    host.querySelectorAll('.unit-card.selected').forEach(el=>el.classList.remove('selected'));
+                    card.classList.add('selected');
+                    if(isAdmin){void loadAdminStudentRecords();}else checkStudentUnitExam();
+                };
+                if(!isAdmin) card.ondblclick=()=>{void openStudentUnit(book,unit);};
                 if (isAdmin) card.querySelector('.unit-switch').onclick=e=>{
                     e.stopPropagation();
                     card.onclick();
@@ -1259,6 +1266,27 @@
             alert(`${fileStatus}❌ 無法將單元開關狀態儲存至 Firestore：examUnits/${key}。\n${error.message}\n請檢查 Firebase 身分驗證與 Firestore Security Rules 是否允許管理員寫入此文件。狀態尚未變更，学生端無法取得本次設定。`);
             button.disabled=false;
         }
+    }
+    let openingStudentUnit=false;
+    async function openStudentUnit(book,unit) {
+        if(isAdmin || openingStudentUnit || !unitStatesLoaded || !unitRecordsLoaded) return;
+        const key=unitKey(book,unit);
+        if(!isDue(unitStates[key]) || !classCanAccess(unitStates[key],currentUserHR)) return;
+        openingStudentUnit=true;
+        try {
+            selectedBook=book;selectedUnit=unit;
+            const records=unitRecords.filter(r=>(r.unitId===key || (Number(r.book)===book && Number(r.unit)===unit)) && isMine(r))
+                .sort((a,b)=>recordTime(b).localeCompare(recordTime(a)));
+            const pending=records.find(r=>recordDetails(r).some(d=>!d.isCorrect));
+            if(records.length && !pending) {viewPreviousResults(records[0]);return;}
+            const accepted=await confirmDatabaseWarning(pending
+                ? `${unitLabel(book,unit)}\n\nReady to correct your mistakes?\nPress OK to begin, or Cancel to return to the menu.`
+                : `${unitLabel(book,unit)}\n\nReady to take the test?\nPress OK to begin, or Cancel to return to the menu.`,
+                pending ? '✍️ Correct Mistakes' : '📚 Start Exam');
+            if(!accepted || isAdmin || !isDue(unitStates[key]) || !classCanAccess(unitStates[key],currentUserHR)) return;
+            selectedBook=book;selectedUnit=unit;
+            await startStudentExam(!!pending,pending);
+        } finally {openingStudentUnit=false;}
     }
     function checkStudentUnitExam() {
         const key=unitKey(selectedBook,selectedUnit), state=unitStates[key];
@@ -2654,10 +2682,11 @@ window.exportWeeklyWord=async button=>{
             restoreNote:'Application JSON backup. Restore with a compatible import tool; not a Firebase managed-export file.'};
     }
     let databaseWarningPending=false;
-    function confirmDatabaseWarning(message) {
+    function confirmDatabaseWarning(message, title='⚠️ Warning') {
         if(databaseWarningPending) return Promise.resolve(false);
         databaseWarningPending=true;
         const modal=document.getElementById('modal-database-warning');
+        document.getElementById('database-warning-title').textContent=title;
         const cancel=document.getElementById('database-warning-cancel');
         const ok=document.getElementById('database-warning-ok');
         const previousFocus=document.activeElement;
