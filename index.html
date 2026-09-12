@@ -705,14 +705,14 @@
         <fieldset style="margin:12px 0;padding:12px;border:1px solid #cbd5e1;border-radius:8px;">
             <legend>Availability Schedule</legend>
             <label><input id="unit-schedule-enabled" type="checkbox"> Enable schedule</label>
-            <p style="font-size:0.85rem;margin:8px 0;">Taiwan time (UTC+08:00). The schedule applies only to formal exams. Corrections remain available at any time. Exams already in progress may finish.</p>
+            <p style="font-size:0.85rem;margin:8px 0;">The schedule applies only to formal exams. Corrections remain available at any time. Exams already in progress may finish.</p>
             <div id="unit-schedule-fields">
-                <label for="unit-start-date">Start date</label>
+                <label for="unit-start-date">Start</label>
                 <input id="unit-start-date" type="date" style="width:100%;margin:4px 0 8px;">
-                <div><label for="unit-start-hour">Start time</label> <select id="unit-start-hour" aria-label="Start hour"></select> : <select id="unit-start-minute" aria-label="Start minute"></select></div>
-                <label for="unit-end-date" style="display:block;margin-top:10px;">End date</label>
+                <div><select id="unit-start-hour" aria-label="Start hour"></select> : <select id="unit-start-minute" aria-label="Start minute"></select></div>
+                <label for="unit-end-date" style="display:block;margin-top:10px;">End</label>
                 <input id="unit-end-date" type="date" style="width:100%;margin:4px 0 8px;">
-                <div><label for="unit-end-hour">End time</label> <select id="unit-end-hour" aria-label="End hour"></select> : <select id="unit-end-minute" aria-label="End minute"></select></div>
+                <div><select id="unit-end-hour" aria-label="End hour"></select> : <select id="unit-end-minute" aria-label="End minute"></select></div>
             </div>
         </fieldset>
         <button id="unit-class-off" class="btn btn-inline btn-danger hidden" style="margin-bottom:12px;" onclick="confirmUnitClasses(false)">Off</button>
@@ -1128,8 +1128,8 @@
         if(!state?.scheduleEnabled) return '';
         const start=Date.parse(state.startsAt),end=Date.parse(state.endsAt);
         if(!Number.isFinite(start) || !Number.isFinite(end)) return 'Invalid schedule';
-        const status=!state.isOpen ? 'Off' : Date.now()<start ? 'Scheduled' : Date.now()>=end ? 'Ended' : 'Open';
-        return `${status}: ${taiwanDateTime(start).replace('T',' ')} – ${taiwanDateTime(end).replace('T',' ')} (Taiwan)`;
+        const status=!state.isOpen ? 'Off' : Date.now()<start ? 'Scheduled' : Date.now()>=end ? 'Ended' : 'On';
+        return `${status}: ${taiwanDateTime(start).replace('T',' ')} – ${taiwanDateTime(end).replace('T',' ')}`;
     }
     function populateUnitSchedule(state) {
         document.getElementById('unit-schedule-enabled').checked=state.scheduleEnabled===true;
@@ -1140,8 +1140,8 @@
             for(const [part,max,value] of [['hour',24,date.slice(11,13)],['minute',60,date.slice(14,16)]]) {
                 const select=document.getElementById(`unit-${side}-${part}`);
                 select.replaceChildren();
-                for(let i=0;i<max;i++) {const v=String(i).padStart(2,'0');select.add(new Option(v,v));}
-                select.value=value;
+                for(let i=0;i<max;i+=(part==='minute' ? 5 : 1)) {const v=String(i).padStart(2,'0');select.add(new Option(v,v));}
+                select.value=part==='minute' ? String(Math.floor(Number(value)/5)*5).padStart(2,'0') : value;
             }
         }
         const toggle=()=>document.querySelectorAll('#unit-schedule-fields input, #unit-schedule-fields select').forEach(el=>el.disabled=!document.getElementById('unit-schedule-enabled').checked);
@@ -1277,7 +1277,7 @@
                 const pending=records.some(r => recordDetails(r).some(d => !d.isCorrect));
                 const icon=isAdmin || !unitRecordsLoaded ? '' : pending ? '❌' : records.length ? '👍' : permitted && isDue(state) ? '⛔' : '';
                 const card=document.createElement('div');card.className='unit-card'+(book===selectedBook && unit===selectedUnit ? ' selected':'');
-                card.innerHTML=`<div class="unit-heading"><button class="unit-name ${displayOpen ? 'open':''}">${icon}Unit${String(unit).padStart(2,'0')}</button>${isAdmin ? `<button class="unit-switch" role="switch" aria-label="${unitLabel(book,unit)}" aria-checked="${state.isOpen===true}">${!state.isOpen ? 'Off' : state.scheduleEnabled ? (isDue(state) ? 'Open' : Date.now()<Date.parse(state.startsAt) ? 'Scheduled' : 'Ended') : 'On'}</button>` : ''}</div><div class="unit-date"></div>`;
+                card.innerHTML=`<div class="unit-heading"><button class="unit-name ${displayOpen ? 'open':''}">${icon}Unit${String(unit).padStart(2,'0')}</button>${isAdmin ? `<button class="unit-switch" role="switch" aria-label="${unitLabel(book,unit)}" aria-checked="${state.isOpen===true}">${state.isOpen ? 'On' : 'Off'}</button>` : ''}</div><div class="unit-date"></div>`;
                 card.querySelector('.unit-date').textContent=permitted && state.scheduleEnabled ? scheduleLabel(state) : displayOpen && typeof state.openedDate === 'string' ? state.openedDate.replaceAll('-','.') : '';
                 card.onclick=()=> {
                     selectedBook=book;selectedUnit=unit;
