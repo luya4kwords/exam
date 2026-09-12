@@ -231,7 +231,7 @@
         .unit-heading .unit-name { grid-column:2; white-space:nowrap; }
         .unit-heading .unit-switch { grid-column:3; justify-self:end; width:28px; padding:2px 0; font-size:.65rem; line-height:16px; }
         #admin-units .unit-name { font-size:.9rem; }
-        .unit-date { color:#16a34a; min-height:21px; font-size:.8rem; padding-top:3px; }
+        .unit-date { color:#16a34a; min-height:21px; font-size:.8rem; padding-top:3px; white-space:pre-line; }
         .unit-switch { border:1px solid #cbd5e1; border-radius:20px; padding:3px 10px; background:#e2e8f0; color:#475569; cursor:pointer; }
         .unit-switch[aria-checked="true"] { background:#dcfce7; color:#166534; border-color:#86efac; }
         .unit-switch:disabled { opacity:1; cursor:default; }
@@ -1136,12 +1136,38 @@
     function taiwanDateTime(value=Date.now()) {
         return new Date(new Date(value).getTime()+8*60*60*1000).toISOString().slice(0,16);
     }
-    function scheduleLabel(state) {
-        if(!state?.scheduleEnabled) return '';
-        const start=Date.parse(state.startsAt),end=Date.parse(state.endsAt);
-        if(!Number.isFinite(start) || !Number.isFinite(end)) return 'Invalid schedule';
-        const status=!state.isOpen ? 'Off' : Date.now()<start ? 'Scheduled' : Date.now()>=end ? 'Ended' : 'On';
-        return `${status}: ${taiwanDateTime(start).replace('T',' ')} – ${taiwanDateTime(end).replace('T',' ')}`;
+    function availabilityHistory(state) {
+        if(Array.isArray(state?.availabilityHistory) && state.availabilityHistory.length)
+            return state.availabilityHistory.map(entry=>({...entry}));
+        // Older files retained only the latest schedule or the opening date.
+        if(state?.scheduleEnabled && state.startsAt && state.endsAt)
+            return [{startsAt:state.startsAt,endsAt:state.endsAt}];
+        if(state?.openedDate) return [{startsAt:state.openedDate,endsAt:null}];
+        return [];
+    }
+    function updateAvailabilityHistory(previous, next, now) {
+        const history=availabilityHistory(previous);
+        if(next.isOpen) {
+            const entry=next.scheduleEnabled
+                ? {startsAt:next.startsAt,endsAt:next.endsAt}
+                : {startsAt:previous?.isOpen && history.length ? history[history.length-1].startsAt : now,endsAt:null};
+            if(previous?.isOpen && history.length) history[history.length-1]=entry;
+            else history.push(entry);
+        } else if(previous?.isOpen && !previous.scheduleEnabled && history.length) {
+            history[history.length-1].endsAt=now;
+        }
+        return history;
+    }
+    function scheduleLabel(state, includeHistory=false) {
+        if(!state?.isOpen) return '';
+        const entries=availabilityHistory(state);
+        const visible=includeHistory ? entries : entries.slice(-1);
+        const format=value=> {
+            if(!value) return '—';
+            if(/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+            return Number.isFinite(Date.parse(value)) ? taiwanDateTime(value).replace('T',' ') : '—';
+        };
+        return visible.map(entry=>`Start: ${format(entry.startsAt)}\nEnd: ${format(entry.endsAt)}`).join('\n');
     }
     function populateUnitSchedule(state) {
         document.getElementById('unit-schedule-enabled').checked=state.scheduleEnabled===true;
@@ -1290,7 +1316,7 @@
                 const icon=isAdmin || !unitRecordsLoaded ? '' : pending ? '❌' : records.length ? '👍' : permitted && isDue(state) ? '⛔' : '';
                 const card=document.createElement('div');card.className='unit-card'+(book===selectedBook && unit===selectedUnit ? ' selected':'');
                 card.innerHTML=`<div class="unit-heading"><button class="unit-name ${displayOpen ? 'open':''}">${icon}Unit${String(unit).padStart(2,'0')}</button>${isAdmin ? `<button class="unit-switch" role="switch" aria-label="${unitLabel(book,unit)}" aria-checked="${state.isOpen===true}">${state.isOpen ? 'On' : 'Off'}</button>` : ''}</div><div class="unit-date"></div>`;
-                card.querySelector('.unit-date').textContent=permitted && state.scheduleEnabled ? scheduleLabel(state) : displayOpen && typeof state.openedDate === 'string' ? state.openedDate.replaceAll('-','.') : '';
+                card.querySelector('.unit-date').textContent=permitted ? scheduleLabel(state,isAdmin) : '';
                 card.onclick=()=> {
                     selectedBook=book;selectedUnit=unit;
                     // Keep the clicked element alive so the browser can detect a double click.
@@ -1354,6 +1380,7 @@
                 else if(!openedDate) throw new Error('This unit has exam records but no original opening date. Restore its opening date before reopening.');
             }
             const state={...unitStates[key],...(schedule || {}),book,unit,isOpen:opening,allowedClasses:opening ? allowedClasses : (unitStates[key]?.allowedClasses || []),openedDate,updatedAt:new Date().toISOString()};
+            state.availabilityHistory=updateAvailabilityHistory(unitStates[key],state,state.updatedAt);
             await setDoc(doc(db,'examUnits',key),state);
             unitStates[key]=state; drawUnits();
             return true;
