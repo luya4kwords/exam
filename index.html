@@ -553,7 +553,7 @@
 <div class="container">
     <!-- Header (Logo + Title) -->
     <div class="header-container">
-        <img src="LUYA_LOGO2.png" alt="LUYA Academy Logo" class="brand-logo">
+        <img src="LUYA_LOGO.jpg" alt="LUYA Academy Logo" class="brand-logo">
         <div class="header-text">
             <h1>Online Examination System</h1>
             <div class="subtitle">Cloud Testing & Automated Scoring Portal</div>
@@ -936,6 +936,7 @@
             sessionStorage.setItem(SESSION_KEY,JSON.stringify({currentUser,currentUserHR,isAdmin,
                 selectedBook,selectedUnit,screen,scrollY:window.scrollY,
                 questions,sectionDefs,currentIndex,userAnswers,isCorrectionMode,activeRecord,activeUnit,
+                examGuardCount:examGuard.count,examGuardLocked:examGuard.locked,
                 recordsHTML:isAdmin ? document.getElementById('records-list').innerHTML : '',
                 resultHTML:screen==='screen-result' ? document.getElementById('screen-result').innerHTML : ''}));
         } catch(error) {console.error('Unable to preserve page:',error);}
@@ -996,7 +997,7 @@
                 userAnswers=saved.userAnswers || {};isCorrectionMode=saved.isCorrectionMode===true;
                 activeRecord=saved.activeRecord;activeUnit=saved.activeUnit;
                 isExamActive=true;
-                if(questions.length) renderQuestion();
+                if(questions.length) {renderQuestion(); prepareExamGuard(saved.examGuardCount || 0, saved.examGuardLocked===true);}
             }
             requestAnimationFrame(()=>window.scrollTo(0,saved.scrollY || 0));
             await refresh;
@@ -2103,6 +2104,7 @@
             document.getElementById('screen-student-select').classList.add('hidden');
             document.getElementById('screen-exam').classList.remove('hidden');
             renderQuestion();
+            prepareExamGuard();
         } catch(error) {alert(`❌ ${error.message}`);} finally {loadingExam=false;}
     }
 
@@ -2344,7 +2346,108 @@
         }
     }
 
+
+    // Formal-exam focus protection. One departure may produce several browser events.
+    const examGuard = {active:false, count:0, episode:false, dialogDepth:0, settling:false, locked:false};
+    let guardTimer;
+    const fullscreenElement = () => document.fullscreenElement || document.webkitFullscreenElement;
+    const guardPanel = document.createElement('div');
+    guardPanel.className='modal-overlay hidden';
+    guardPanel.setAttribute('role','dialog');
+    guardPanel.setAttribute('aria-modal','true');
+    guardPanel.style.zIndex='10000';
+    guardPanel.innerHTML='<div class="modal-card"><h3>正式考試 / Formal Exam</h3><p id="exam-guard-message" role="alert"></p><button type="button" class="btn btn-emerald-grad">進入全螢幕並繼續 / Continue</button></div>';
+    document.body.appendChild(guardPanel);
+    const guardButton=guardPanel.querySelector('button');
+    function guardMessage(message) {
+        guardPanel.querySelector('p').textContent=message;
+        guardPanel.classList.remove('hidden');
+        guardButton.focus();
+    }
+    async function requestExamFullscreen() {
+        if(!fullscreenElement()) {
+            const request=document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen;
+            if(!request) throw new Error('此瀏覽器不支援全螢幕，請使用支援 Fullscreen 的瀏覽器進行正式考試。');
+            await request.call(document.documentElement);
+        }
+        if(!fullscreenElement()) throw new Error('請允許全螢幕後再開始正式考試。');
+    }
+    const continueGuard=async () => {
+        guardButton.disabled=true;
+        try {
+            await requestExamFullscreen();
+            if(document.hidden || !document.hasFocus()) throw new Error('請回到考試視窗再繼續。');
+            guardPanel.classList.add('hidden');
+            examGuard.episode=false;
+            examGuard.active=true;
+            savePageSession();
+        } catch(error) {guardMessage(error.message || '無法進入全螢幕，請按下按鈕重試。');}
+        finally {guardButton.disabled=false;}
+    };
+    function prepareExamGuard(count=0, locked=false) {
+        guardButton.onclick=continueGuard;
+        guardButton.textContent='進入全螢幕並繼續 / Continue';
+        examGuard.active=false;
+        examGuard.count=count;
+        examGuard.locked=locked;
+        examGuard.episode=false;
+        if(isCorrectionMode) return;
+        if(locked) {retryLockedSubmission();return;}
+        guardMessage('正式考試須使用全螢幕。切換分頁、視窗、失焦或離開全螢幕：第一次警告，再次違規將自動交卷。請按下方按鈕開始／繼續。');
+        // A fresh click is required if asynchronous loading consumed user activation.
+        guardButton.click();
+    }
+    function stopExamGuard() {
+        examGuard.active=false;
+        clearTimeout(guardTimer);
+        guardPanel.classList.add('hidden');
+    }
+    function retryLockedSubmission() {
+        stopExamGuard();
+        showResults();
+    }
+    function detectExamDeparture(reason) {
+        if(!examGuard.active || !isExamActive || isCorrectionMode || savingResult || leavingSession || examGuard.dialogDepth || examGuard.settling || examGuard.episode) return;
+        examGuard.episode=true;
+        examGuard.count++;
+        saveCurrentAnswer();
+        savePageSession();
+        if(examGuard.count===1) {
+            guardMessage('⚠️ 第一次違規警告：'+reason+'。本次不交卷；若再次切換分頁、視窗、失焦或離開全螢幕，系統將立即自動交卷。請按下方按鈕返回考試。');
+        } else {
+            examGuard.locked=true;
+            savePageSession();
+            retryLockedSubmission();
+        }
+    }
+    window.addEventListener('blur',()=>detectExamDeparture('考試視窗失去焦點'));
+    document.addEventListener('visibilitychange',()=>{if(document.hidden) detectExamDeparture('離開考試分頁');});
+    for(const event of ['fullscreenchange','webkitfullscreenchange'])
+        document.addEventListener(event,()=>{if(!fullscreenElement()) detectExamDeparture('離開全螢幕');});
+    // Native dialogs can generate delayed blur/fullscreen events. Resume only after
+    // those events settle, with a fullscreen gate if the dialog exited fullscreen.
+    for(const name of ['alert','confirm','prompt']) {
+        const nativeDialog=window[name].bind(window);
+        window[name]=(...args)=>{
+            examGuard.dialogDepth++;
+            try {return nativeDialog(...args);}
+            finally {
+                examGuard.dialogDepth--;
+                examGuard.settling=true;
+                clearTimeout(guardTimer);
+                guardTimer=setTimeout(()=>{
+                    examGuard.settling=false;
+                    if(examGuard.active && isExamActive && !isCorrectionMode && !examGuard.episode && (!fullscreenElement() || document.hidden || !document.hasFocus())) {
+                        examGuard.episode=true;
+                        guardMessage('系統對話框已關閉，請返回全螢幕繼續考試。本次不計違規。');
+                    }
+                },300);
+            }
+        };
+    }
+
     function submitExamWithCheck() {
+        if(savingResult || examGuard.locked) return;
         saveCurrentAnswer();
 
         let unansweredNums = [];
@@ -2390,6 +2493,7 @@
     }
 
     async function showResults() {
+        stopExamGuard();
         isExamActive = false; // 解除防誤刷保護
 
         document.getElementById('screen-exam').classList.add('hidden');
@@ -2458,9 +2562,18 @@
             document.getElementById('screen-result').classList.add('hidden');
             document.getElementById('screen-exam').classList.remove('hidden');
             isExamActive=true;
+            if(examGuard.locked) {
+                guardMessage('自動交卷尚未儲存成功，答案已鎖定。請檢查網路後按下按鈕重試交卷。');
+                guardButton.textContent='重試交卷 / Retry submission';
+                guardButton.onclick=retryLockedSubmission;
+            } else if(!isCorrectionMode) prepareExamGuard(examGuard.count);
             return;
         } finally {savingResult=false;}
 
+        if(!isCorrectionMode && fullscreenElement()) {
+            try {await (document.exitFullscreen || document.webkitExitFullscreen).call(document);} catch(error) {console.warn(error);}
+        }
+        savePageSession();
         const remainingWrong = (studentRecord.details || []).filter(d => !d.isCorrect).length;
 
         document.getElementById('result-status-title').innerText = isCorrectionMode ? "Correction Result" : "Test Completed!";
