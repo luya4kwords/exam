@@ -63,6 +63,16 @@
         }
         #screen-login.hidden ~ .login-footer { display: none; }
 
+        #modal-unit-classes .modal-card {max-width:500px;font-family:inherit;}
+        .schedule-columns {display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;}
+        .schedule-columns input,.schedule-columns select {font:inherit;border:1px solid #cbd5e1;border-radius:7px;padding:6px;max-width:100%;}
+        .schedule-columns label {display:block;font-weight:700;margin-bottom:6px;}
+        .makeup-settings {margin:16px 0;padding:14px 16px;border:1px solid #c7d2fe;border-radius:12px;background:#f5f7ff;}
+        .makeup-settings label {font-weight:700;display:flex;gap:8px;align-items:center;}
+        #makeup-code-display {font-size:1.2rem;letter-spacing:1px;font-weight:700;color:#4338ca;margin-top:8px;}
+        #unit-schedule-notice {font-size:.85rem;color:#64748b;margin:10px 0;}
+        @media(max-width:420px) {.schedule-columns {grid-template-columns:1fr;}}
+
         /* Header Layout */
         .header-container {
             display: grid;
@@ -717,18 +727,24 @@
         <h3 id="unit-classes-title" class="modal-title"></h3>
         <fieldset style="margin:12px 0;padding:12px;border:1px solid #cbd5e1;border-radius:8px;">
             <legend>Availability Schedule</legend>
-            <label><input id="unit-schedule-enabled" type="checkbox"> Enable schedule</label>
+            <label><input id="unit-schedule-enabled" type="checkbox" checked disabled> Enable schedule</label>
             <p style="font-size:0.85rem;margin:8px 0;">This schedule applies only to formal exams. Students can review past exams and complete corrections at any time.</p>
-            <div id="unit-schedule-fields">
-                <label for="unit-start-date"><strong>Start Date &amp; Time</strong></label>
-                <input id="unit-start-date" type="date" style="width:100%;margin:4px 0 8px;">
-                <div><select id="unit-start-hour" aria-label="Start hour"></select> : <select id="unit-start-minute" aria-label="Start minute"></select></div>
-                <label for="unit-end-date" style="display:block;margin-top:10px;"><strong>End Date &amp; Time</strong></label>
-                <input id="unit-end-date" type="date" style="width:100%;margin:4px 0 8px;">
-                <div><select id="unit-end-hour" aria-label="End hour"></select> : <select id="unit-end-minute" aria-label="End minute"></select></div>
+            <div id="unit-schedule-fields" class="schedule-columns">
+                <div><label for="unit-start-date">Start Date &amp; Time</label>
+                <input id="unit-start-date" type="date" style="width:100%;margin-bottom:8px;">
+                <div><select id="unit-start-hour" aria-label="Start hour"></select> : <select id="unit-start-minute" aria-label="Start minute"></select></div></div>
+                <div><label for="unit-end-date">End Date &amp; Time</label>
+                <input id="unit-end-date" type="date" style="width:100%;margin-bottom:8px;">
+                <div><select id="unit-end-hour" aria-label="End hour"></select> : <select id="unit-end-minute" aria-label="End minute"></select></div></div>
             </div>
         </fieldset>
-        <button id="unit-class-off" class="btn btn-inline btn-danger hidden" style="margin-bottom:12px;" onclick="confirmUnitClasses(false)">Off</button>
+        <div class="makeup-settings">
+            <label><input id="generate-makeup-code" type="checkbox"> Generate Make-up Code</label>
+            <p style="font-size:.85rem;margin-top:8px;">One code for all eligible make-up units during this supervised session.</p>
+            <div id="makeup-code-display" role="status"></div>
+        </div>
+        <p id="unit-schedule-notice" role="status"></p>
+        <button id="unit-class-off" class="hidden" disabled>Off</button>
         <p style="margin-bottom:12px;">Select classes eligible for this exam.</p>
         <div id="unit-class-options" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;max-height:280px;overflow-y:auto;"></div>
         <div class="modal-btn-row">
@@ -790,8 +806,8 @@
 <!-- Firebase & Application Script -->
 <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
-    import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, setPersistence, browserSessionPersistence } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
-    import { getFirestore, doc, setDoc, getDoc, getDocFromServer, collection, getDocs, getDocsFromServer, writeBatch } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+    import { getAuth, signInAnonymously, GoogleAuthProvider, signInWithPopup, signOut, setPersistence, browserSessionPersistence } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+    import { getFirestore, runTransaction, doc, setDoc, getDoc, getDocFromServer, collection, getDocs, getDocsFromServer, writeBatch } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
 
     const firebaseConfig = {
         apiKey: "AIzaSyAbpAnc5Ub9mGGm5kUgP3jCKXwAnZONwrE",
@@ -848,7 +864,12 @@
     const DEFAULT_PLACEHOLDER = "e.g., Peter Pan (Full English Name)";
 
     async function saveResultToCloud(dateStr, studentName, recordData) {
-        await setDoc(doc(db, "records", recordData.recordId), recordData);
+        if(recordData.uid && recordData.startedAt && !isCorrectionMode) {
+            const batch=writeBatch(db);
+            batch.set(doc(db,'records',recordData.recordId),recordData);
+            batch.update(doc(db,'examStarts',recordData.recordId),{status:'completed'});
+            await batch.commit();
+        } else await setDoc(doc(db, "records", recordData.recordId), recordData);
     }
     async function getResultsFromCloud(unitId) {
         const snapshot = await getDocs(collection(db, "records"));
@@ -1094,6 +1115,7 @@
         );
 
         if (matchedStudent) {
+            try {await ensureStudentSession();} catch(error) {alert('Unable to sign in. Ask Administrator to enable Firebase Anonymous authentication.');return;}
             isAdmin = false;
             currentUser = matchedStudent.name;
             currentUserHR = matchedStudent.hr;
@@ -1170,8 +1192,211 @@
         };
         return visible.map(entry=>`Start: ${format(entry.startsAt)}\nEnd: ${format(entry.endsAt)}`).join('\n');
     }
+// Pure policy shared by the next UI and tests. All persisted instants are ISO UTC.
+// Taiwan calendar dates label the original exam, even when it ends after midnight.
+function examWindow(state) {
+    const start=Date.parse(state?.startsAt), end=Date.parse(state?.endsAt);
+    return Number.isFinite(start) && Number.isFinite(end) && start<end
+        ? {start,end} : null;
+}
+function examPhase(state, now=Date.now()) {
+    const window=examWindow(state);
+    if(!window) return 'unconfigured';
+    if(state.isOpen!==true) return 'closed';
+    if(now<window.start) return 'scheduled';
+    return now<window.end ? 'active' : 'closed';
+}
+function originalExamDate(state) {
+    const window=examWindow(state);
+    return window ? new Date(window.start+28800000).toISOString().slice(0,10) : null;
+}
+function sameExam(record,state) {
+    return record.unitId===state.unitId ||
+        (Number(record.book)===Number(state.book) && Number(record.unit)===Number(state.unit));
+}
+function sameStudent(record,student) {
+    return String(record.studentHR || '').trim()===String(student.hr).trim() &&
+        String(record.studentName || '').trim().toLowerCase()===String(student.name).trim().toLowerCase();
+}
+function eligibleStudent(state,student) {
+    // Freeze eligible classes with the original exam schedule.
+    return (state.examClasses || state.allowedClasses || []).includes(String(student.hr).trim());
+}
+function absenceEntries(student,states,records,attempts=[],now=Date.now()) {
+    return states.flatMap(state=>{
+        const window=examWindow(state);
+        if(!window || now<window.end || !eligibleStudent(state,student)) return [];
+        const own=records.filter(record=>sameExam(record,state) && sameStudent(record,student));
+        const timely=own.some(record=>{
+            if(record.isMakeup===true) return false;
+            const started=Date.parse(record.startedAt || record.submittedAt);
+            // Legacy records may only retain a date, with no reliable time.
+            return Number.isFinite(started) ? started>=window.start && started<window.end
+                : record.date===originalExamDate(state);
+        });
+        if(timely) return [];
+        // An exam begun before closing remains in progress, not absent.
+        const inProgress=attempts.some(attempt=>sameExam(attempt,state) && sameStudent(attempt,student) &&
+            attempt.status==='in_progress' && attempt.isMakeup!==true &&
+            Date.parse(attempt.startedAt)>=window.start && Date.parse(attempt.startedAt)<window.end);
+        if(inProgress) return [];
+        const completed=own.length>0;
+        return [{unitId:state.unitId,book:state.book,unit:state.unit,date:originalExamDate(state),
+            scheduledEnd:state.endsAt,status:completed ? 'completed' : 'pending',
+            madeUpAt:completed ? own.map(record=>record.submittedAt || record.date).sort()[0] : null}];
+    });
+}
+function hasParticipation(state,records,attempts=[]) {
+    // Fail closed across all attempts for this unit, including legacy submissions.
+    return records.some(record=>sameExam(record,state)) || attempts.some(attempt=>sameExam(attempt,state));
+}
+function mayReplaceSchedule(state,records,attempts=[],now=Date.now()) {
+    const phase=examPhase(state,now);
+    return !hasParticipation(state,records,attempts) && phase!=='active';
+}
+function makeupHosts(states,now=Date.now()) {
+    return states.filter(state=>state.generateMakeupCode===true && examPhase(state,now)==='active');
+}
+function studentUnitPresentation(state,student,records,states,attempts=[],now=Date.now()) {
+    const completed=records.some(record=>sameExam(record,state) && sameStudent(record,student));
+    const missed=absenceEntries(student,[state],records,attempts,now).some(entry=>entry.status==='pending');
+    const regular=eligibleStudent(state,student) && examPhase(state,now)==='active';
+    const makeup=missed && makeupHosts(states,now).length>0;
+    return {blue:completed || regular || makeup,absent:missed,canMakeup:makeup,completed};
+}
+
+    let examStarts=[], startsLoaded=false, makeupBusy=false;
+    const statesForPolicy=()=>Object.entries(unitStates).map(([unitId,state])=>({...state,unitId}));
+    const currentStudent=()=>({name:currentUser,hr:currentUserHR});
+    const policyState=(book,unit)=>({...unitStates[unitKey(book,unit)],book,unit,unitId:unitKey(book,unit)});
+    async function ensureStudentSession() {
+        await authReady;
+        await auth.authStateReady();
+        if(!auth.currentUser) await signInAnonymously(auth);
+    }
+    async function refreshExamStarts() {
+        const snap=await getDocsFromServer(collection(db,'examStarts'));
+        examStarts=snap.docs.map(d=>({...d.data(),id:d.id}));startsLoaded=true;
+    }
+    async function refreshPolicyData() {
+        const [states,records]=await Promise.all([getDocsFromServer(collection(db,'examUnits')),getDocsFromServer(collection(db,'records')),refreshExamStarts()]);
+        unitStates=Object.fromEntries(states.docs.map(d=>[d.id,d.data()]));
+        unitRecords=records.docs.map(d=>({...d.data(),recordId:d.id}));
+        unitStatesLoaded=unitRecordsLoaded=true;
+        if(isAdmin) {
+            const batch=writeBatch(db);let changed=false;
+            for(const [key,value] of Object.entries(unitStates)) {
+                const window=examWindow(value);
+                if(!window) continue;
+                const patch={};
+                if(value.startMs!==window.start || value.endMs!==window.end) {patch.startMs=window.start;patch.endMs=window.end;}
+                if(!value.examClasses) patch.examClasses=value.allowedClasses || [];
+                if(!value.hasParticipation && hasParticipation({...value,unitId:key},unitRecords,examStarts)) patch.hasParticipation=true;
+                if(Object.keys(patch).length) {batch.update(doc(db,'examUnits',key),patch);Object.assign(value,patch);changed=true;}
+            }
+            if(changed) await batch.commit();
+        }
+    }
+    function canEnterUnit(book,unit) {
+        const state=policyState(book,unit);
+        return studentUnitPresentation(state,currentStudent(),unitRecords,statesForPolicy(),examStarts).blue;
+    }
+    async function stableAttemptId(book,unit) {
+        const bytes=new TextEncoder().encode(`${currentUserHR}\n${normalizeLoginValue(currentUser)}`);
+        const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),v=>v.toString(16).padStart(2,'0')).join('');
+        return `${unitKey(book,unit)}_${hash}`;
+    }
+    async function showSharedMakeupCode() {
+        const box=document.getElementById('makeup-code-display');
+        box.textContent='';
+        if(!isAdmin) return;
+        try {
+            const snap=await getDocFromServer(doc(db,'makeupAdmin','current'));
+            if(snap.exists()) box.textContent=`Make-up Code: ${snap.data().code}`;
+        } catch(error) {box.textContent='Code unavailable. Check the updated Firestore rules.';}
+    }
+    function sixDigitCode() {
+        const values=new Uint32Array(1);
+        do {crypto.getRandomValues(values);} while(values[0]>=4294000000);
+        return String(values[0]%1000000).padStart(6,'0');
+    }
+    async function authorizeExamStart(book,unit) {
+        await ensureStudentSession();
+        await refreshPolicyData();
+        const state=policyState(book,unit), student=currentStudent();
+        if(unitRecords.some(r=>sameExam(r,state) && sameStudent(r,student))) throw new Error('You have already completed this exam. Please use corrections or view your result.');
+        const regular=examPhase(state)==='active' && eligibleStudent(state,student);
+        const missed=absenceEntries(student,[state],unitRecords,examStarts).some(e=>e.status==='pending');
+        let host=null;
+        if(!regular) {
+            const hosts=makeupHosts(statesForPolicy());
+            if(!missed || !hosts.length) throw new Error('Make-up exams are only available during a supervised exam session.');
+            const code=prompt('Enter the 6-digit make-up code provided by your teacher:');
+            if(code===null) return null;
+            if(!/^\d{6}$/.test(code.trim())) throw new Error('Please enter a 6-digit code.');
+            host=hosts.sort((a,b)=>Date.parse(b.endsAt)-Date.parse(a.endsAt))[0];
+            try {
+                await setDoc(doc(db,'makeupChecks',auth.currentUser.uid),{code:code.trim(),hostId:host.unitId});
+            } catch(error) {throw new Error('Invalid make-up code, expired session, or unavailable verification. Please ask your teacher.');}
+        }
+        const attemptId=await stableAttemptId(book,unit);
+        const ref=doc(db,'examStarts',attemptId), unitRef=doc(db,'examUnits',unitKey(book,unit));
+        const result=await runTransaction(db,async transaction=>{
+            const [existing,latest]=await Promise.all([transaction.get(ref),transaction.get(unitRef)]);
+            if(existing.exists()) throw new Error('This exam has already been started. Resume it in the original browser, or ask your teacher for help.');
+            const fresh={...latest.data(),unitId:unitKey(book,unit)};
+            if(!host && examPhase(fresh)!=='active') throw new Error('The exam entry time has ended.');
+            const now=new Date().toISOString();
+            const attempt={book,unit,unitId:unitKey(book,unit),studentName:currentUser,studentHR:currentUserHR,
+                uid:auth.currentUser.uid,startedAt:now,status:'in_progress',isMakeup:!!host,
+                originalExamDate:originalExamDate(fresh),hostId:host?.unitId || '',recordId:attemptId};
+            transaction.set(ref,attempt);
+            if(!fresh.hasParticipation) transaction.update(unitRef,{hasParticipation:true,participationId:attemptId});
+            return attempt;
+        });
+        examStarts.push({...result,id:attemptId});
+        return result;
+    }
+    async function saveScheduledUnit(book,unit,classes,schedule) {
+        const key=unitKey(book,unit);
+        await refreshPolicyData();
+        const before=policyState(book,unit);
+        if(!mayReplaceSchedule(before,unitRecords,examStarts) || before.hasParticipation)
+            throw new Error('This schedule is locked. Exams in progress cannot be changed. After participation, use make-up exams.');
+        if(!schedule?.scheduleEnabled || Date.parse(schedule.endsAt)<=Date.now()) throw new Error('Please set a future end time.');
+        await loadUnitExam(book,unit);
+        const codeEnabled=document.getElementById('generate-makeup-code').checked;
+        const control=doc(db,'makeupAdmin','current');
+        const unitRef=doc(db,'examUnits',key);
+        const saved=await runTransaction(db,async transaction=>{
+            const old=await transaction.get(unitRef);
+            const prior=old.exists() ? {...old.data(),unitId:key} : {unitId:key,book,unit};
+            const codeDoc=codeEnabled ? await transaction.get(control) : null;
+            if(prior.hasParticipation || !mayReplaceSchedule(prior,unitRecords,examStarts)) throw new Error('This schedule was locked by a new exam start. Refresh and try again.');
+            const state={...prior,...schedule,book,unit,isOpen:true,examClasses:classes,allowedClasses:classes,
+                openedDate:taiwanDateTime(schedule.startsAt).slice(0,10),
+                startMs:Date.parse(schedule.startsAt),endMs:Date.parse(schedule.endsAt),
+                generateMakeupCode:codeEnabled,updatedAt:new Date().toISOString(),policyVersion:2,
+                availabilityHistory:[{startsAt:schedule.startsAt,endsAt:schedule.endsAt}]};
+            delete state.unitId;
+            if(codeEnabled) {
+                const otherWindow=statesForPolicy().some(u=>u.unitId!==key && u.generateMakeupCode && Date.parse(u.endsAt)>Date.now());
+                const code=codeDoc.exists() && otherWindow ? codeDoc.data().code : sixDigitCode();
+                transaction.set(control,{code,updatedAt:new Date().toISOString()});
+            }
+            transaction.set(unitRef,state);
+            return state;
+        });
+        unitStates[key]=saved;drawUnits();
+        if(codeEnabled) {
+            await showSharedMakeupCode();
+            await confirmDatabaseWarning(document.getElementById('makeup-code-display').textContent+'\n\nThis code works for all eligible make-up units during enabled supervised sessions.','Make-up Code');
+        }
+        return true;
+    }
+
     function populateUnitSchedule(state) {
-        document.getElementById('unit-schedule-enabled').checked=state.scheduleEnabled===true;
+        document.getElementById('unit-schedule-enabled').checked=true;
         for(const side of ['start','end']) {
             const stored=side==='start' ? state.startsAt : state.endsAt;
             const date=taiwanDateTime(Number.isFinite(Date.parse(stored)) ? stored : Date.now()+(side==='end' ? 3600000 : 0));
@@ -1279,7 +1504,10 @@
             errors.push(`Exam records could not sync (${error.code || error.message}). Please reload before starting an exam.`);
             notice.textContent = errors.join(' ');
         });
-        await Promise.allSettled([stateTask, recordTask]);
+        await Promise.allSettled([stateTask, recordTask,refreshExamStarts().then(refresh).catch(error=>{
+            startsLoaded=false;errors.push('Exam participation could not sync. Check the updated Firestore rules.');
+        })]);
+        if(isAdmin) {try {await refreshPolicyData();refresh();} catch(error) {errors.push('Schedule migration could not sync. Please retry before starting exams.');}}
         notice.textContent = errors.join(' ');
     }
     let availabilitySignature='', scheduleSyncBusy=false;
@@ -1293,6 +1521,7 @@
         scheduleSyncBusy=true;
         try {
             const states=await getDocsFromServer(collection(db,'examUnits'));
+            await refreshExamStarts();
             // Do not overwrite newer local edits if an administrator opened the editor meanwhile.
             if(savingUnitClasses || pendingUnitClasses || isExamActive) return;
             const fresh=Object.fromEntries(states.docs.map(d=>[d.id,d.data()]));
@@ -1314,11 +1543,12 @@
                 const records=unitRecords.filter(r => (r.unitId===key || (r.book===book && r.unit===unit)) && isMine(r));
                 // Completed attempts remain accessible for correction/review after the unit closes.
                 // Admin colour continues to reflect only the On/Off setting.
-                const displayOpen=isAdmin ? state.isOpen===true : records.length>0 || (isDue(state) && permitted);
+                const presentation=studentUnitPresentation({...state,book,unit,unitId:key},currentStudent(),unitRecords,statesForPolicy(),examStarts);
+                const displayOpen=isAdmin ? examPhase(state)==='active' : presentation.blue;
                 const pending=records.some(r => recordDetails(r).some(d => !d.isCorrect));
-                const icon=isAdmin || !unitRecordsLoaded ? '' : pending ? '❌' : records.length ? '👍' : permitted && isDue(state) ? '⛔' : '';
+                const icon=isAdmin || !unitRecordsLoaded ? '' : pending ? '❌' : records.length ? '👍' : presentation.absent ? '⛔' : '';
                 const card=document.createElement('div');card.className='unit-card'+(book===selectedBook && unit===selectedUnit ? ' selected':'');
-                card.innerHTML=`<div class="unit-heading"><button class="unit-name ${displayOpen ? 'open':''}">${icon}Unit${String(unit).padStart(2,'0')}</button>${isAdmin ? `<button class="unit-switch" role="switch" aria-label="${unitLabel(book,unit)}" aria-checked="${state.isOpen===true}">${state.isOpen ? 'On' : 'Off'}</button>` : ''}</div><div class="unit-date"></div>`;
+                card.innerHTML=`<div class="unit-heading"><button class="unit-name ${displayOpen ? 'open':''}">${icon}Unit${String(unit).padStart(2,'0')}</button>${isAdmin ? `<button class="unit-switch" role="switch" aria-label="${unitLabel(book,unit)}" aria-checked="${state.isOpen===true}">${['scheduled','active'].includes(examPhase(state)) ? 'On' : 'Off'}</button>` : ''}</div><div class="unit-date"></div>`;
                 const dates=card.querySelector('.unit-date');
                 if(isAdmin) {
                     for(const entry of availabilityHistory(state)) {
@@ -1327,10 +1557,10 @@
                         // Legacy date-only entries have no saved time; interpret their day in UTC+08.
                         const start=Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(entry.startsAt)
                             ? `${entry.startsAt}T00:00:00+08:00` : entry.startsAt);
-                        pair.style.color=state.isOpen===true && Number.isFinite(start) && Date.now()>=start ? '#16a34a' : '#94a3b8';
+                        pair.style.color=examPhase(state)==='active' ? '#16a34a' : '#94a3b8';
                         dates.appendChild(pair);
                     }
-                } else dates.textContent=permitted ? scheduleLabel(state) : '';
+                } else {dates.textContent=permitted ? scheduleLabel({...state,isOpen:true}) : '';dates.style.color=examPhase(state)==='active' ? '#16a34a' : '#94a3b8';}
                 card.onclick=()=> {
                     selectedBook=book;selectedUnit=unit;
                     // Keep the clicked element alive so the browser can detect a double click.
@@ -1351,7 +1581,9 @@
     }
     async function toggleUnit(book,unit,button) {
         if(!isAdmin || button.disabled || savingUnitClasses) return;
-        const state=unitStates[unitKey(book,unit)] || {};
+        button.disabled=true;
+        try {await refreshPolicyData();} catch(error) {alert('Unable to verify exam participation. Please try again.');return;} finally {button.disabled=false;}
+        const state=policyState(book,unit);
         {
             if(!populateLeaderboardClassOptions('unit-class-options')) return;
             const boxes=[...document.querySelectorAll('#unit-class-options input[name="leaderboard-class"]')];
@@ -1360,7 +1592,16 @@
             pendingUnitClasses={book,unit};
             populateUnitSchedule(state);
             document.getElementById('unit-classes-title').textContent=`📚 ${unitLabel(book,unit)}`;
-            document.getElementById('unit-class-off').classList.toggle('hidden',!state.isOpen);
+            document.getElementById('unit-class-off').classList.add('hidden');
+            const locked=state.hasParticipation || !mayReplaceSchedule(state,unitRecords,examStarts);
+            document.querySelectorAll('#unit-schedule-fields input,#unit-schedule-fields select,#unit-class-options input').forEach(el=>el.disabled=locked);
+            const generate=document.getElementById('generate-makeup-code');
+            generate.checked=state.generateMakeupCode===true;generate.disabled=locked;
+            document.getElementById('unit-class-confirm').disabled=locked;
+            document.getElementById('unit-schedule-notice').textContent=locked
+                ? 'Schedule locked. Existing participants keep their original exam. Missing students must use a supervised make-up session.'
+                : 'This schedule can be replaced only if no student has started or completed the exam. The previous unused schedule will be replaced.';
+            await showSharedMakeupCode();
             document.getElementById('unit-class-confirm').textContent='Save Availability';
             document.getElementById('modal-unit-classes').classList.remove('hidden');
             document.getElementById('unit-class-confirm').focus();
@@ -1368,41 +1609,11 @@
         }
     }
     async function persistUnitState(book,unit,button,allowedClasses=[],desiredOpen=null,schedule=null) {
-        if(!isAdmin || button.disabled) return;
+        if(!isAdmin || button.disabled || desiredOpen===false) return false;
         button.disabled=true;
-        const key=unitKey(book,unit), wasOpen=unitStates[key]?.isOpen===true;
-        const opening=desiredOpen === null ? !wasOpen : desiredOpen;
-        if(opening && !allowedClasses.length) {button.disabled=false;return false;}
-        if(opening && !wasOpen) {
-            try { await loadUnitExam(book,unit); }
-            catch(error) {
-                alert(`❌ 無法讀取或解析 index.html 同目錄的 ${key}.xlsx。\n${error.message}\n請確認檔名大小寫與檔案內容。單元未開啟。`);
-                button.disabled=false;
-                return;
-            }
-        }
-        try {
-            let openedDate=unitStates[key]?.openedDate || '';
-            if(opening && !wasOpen) {
-                // Check all classes against server records, including older unitId-only records.
-                const snapshot=await getDocsFromServer(collection(db,'records'));
-                const hasAttempts=snapshot.docs.some(recordDoc=>{
-                    const record=recordDoc.data();
-                    return record.unitId===key || (Number(record.book)===Number(book) && Number(record.unit)===Number(unit));
-                });
-                if(!hasAttempts) openedDate=getFormattedDate();
-                else if(!openedDate) throw new Error('This unit has exam records but no original opening date. Restore its opening date before reopening.');
-            }
-            const state={...unitStates[key],...(schedule || {}),book,unit,isOpen:opening,allowedClasses:opening ? allowedClasses : (unitStates[key]?.allowedClasses || []),openedDate,updatedAt:new Date().toISOString()};
-            state.availabilityHistory=updateAvailabilityHistory(unitStates[key],state,state.updatedAt);
-            await setDoc(doc(db,'examUnits',key),state);
-            unitStates[key]=state; drawUnits();
-            return true;
-        } catch(error) {
-            const fileStatus=opening && !wasOpen ? `✅ 已成功讀取並驗證同目錄的 ${key}.xlsx。\n` : '';
-            alert(`${fileStatus}❌ 無法將單元開關狀態儲存至 Firestore：examUnits/${key}。\n${error.message}\n請檢查 Firebase 身分驗證與 Firestore Security Rules 是否允許管理員寫入此文件。狀態尚未變更，学生端無法取得本次設定。`);
-            button.disabled=false;
-        }
+        try {return await saveScheduledUnit(book,unit,allowedClasses,schedule);}
+        catch(error) {alert(error.message || 'Unable to save schedule.');return false;}
+        finally {button.disabled=false;}
     }
     function studentReminderMessage() {
         if(isAdmin || !unitStatesLoaded || !unitRecordsLoaded) return '';
@@ -1412,7 +1623,7 @@
             const key=unitKey(book,unit), state=unitStates[key];
             const records=unitRecords.filter(r=>isMine(r) && (r.unitId===key || (Number(r.book)===book && Number(r.unit)===unit)));
             if(records.some(r=>recordDetails(r).some(d=>!d.isCorrect))) corrections=true;
-            if(isDue(state) && classCanAccess(state,currentUserHR) && state.openedDate<today && !records.length) missed=true;
+            if(absenceEntries(currentStudent(),[{...state,book,unit,unitId:key}],unitRecords,examStarts).some(e=>e.status==='pending')) missed=true;
         }
         return corrections && missed ? 'You have corrections and missed tests to complete. Please correct your mistakes and take any tests you missed.'
             : corrections ? 'You have mistakes to correct. Please complete your corrections.'
@@ -1433,13 +1644,13 @@
             const records=unitRecords.filter(r=>(r.unitId===key || (Number(r.book)===book && Number(r.unit)===unit)) && isMine(r))
                 .sort((a,b)=>recordTime(b).localeCompare(recordTime(a)));
             const pending=records.find(r=>recordDetails(r).some(d=>!d.isCorrect));
-            if(!records.length && (!isDue(unitStates[key]) || !classCanAccess(unitStates[key],currentUserHR))) return;
+            if(!records.length && !canEnterUnit(book,unit)) return;
             if(records.length && !pending) {viewPreviousResults(records[0]);return;}
             const accepted=await confirmDatabaseWarning(pending
                 ? `${unitLabel(book,unit)}\n\nReady to correct your mistakes?\nPress OK to begin, or Cancel to return to the menu.`
                 : `${unitLabel(book,unit)}\n\nReady to take the test?\nPress OK to begin, or Cancel to return to the menu.`,
                 pending ? '✍️ Correct Mistakes' : '📚 Start Exam');
-            if(!accepted || isAdmin || (!pending && (!isDue(unitStates[key]) || !classCanAccess(unitStates[key],currentUserHR)))) return;
+            if(!accepted || isAdmin || (!pending && !canEnterUnit(book,unit))) return;
             selectedBook=book;selectedUnit=unit;
             await startStudentExam(!!pending,pending);
         } finally {openingStudentUnit=false;}
@@ -1453,10 +1664,10 @@
         const records=unitRecords.filter(r => (r.unitId===key || (r.book===selectedBook && r.unit===selectedUnit)) && isMine(r)).sort((a,b)=>recordTime(b).localeCompare(recordTime(a)));
         const pending=records.find(r=>recordDetails(r).some(d=>!d.isCorrect));
         const record=pending || records[0];
-        if(!record && (!isDue(state) || !classCanAccess(state,currentUserHR))) {msg.textContent=classCanAccess(state,currentUserHR) && state?.scheduleEnabled ? scheduleLabel(state) : 'Please select a unit to take the test.';return;}
+        if(!record && !canEnterUnit(selectedBook,selectedUnit)) {msg.textContent=classCanAccess(state,currentUserHR) && state?.scheduleEnabled ? scheduleLabel(state) : 'Please select a unit to take the test.';return;}
         document.getElementById('student-selected-unit').textContent=unitLabel(selectedBook,selectedUnit);
         msg.textContent=record ? `Initial Score: ${record.score}/${record.totalPossible} · Exam date: ${record.date}` : '✅ This unit is ready for your exam.';
-        button.textContent=pending ? '✍️ Start Correcting Mistakes' : record ? '🔍 View Exam Record' : '🚀 Start Exam';
+        button.textContent=pending ? '✍️ Start Correcting Mistakes' : record ? '🔍 View Exam Record' : examPhase(state)==='active' ? '🚀 Start Exam' : 'Make-up';
         button.onclick=()=>record && !pending ? viewPreviousResults(record) : startStudentExam(!!pending,pending);
         button.classList.remove('hidden');
     }
@@ -1649,37 +1860,17 @@
         container.innerHTML = '<p style="color: var(--text-muted); font-size: 0.9rem;">⏳ Scanning all absentee records...</p>';
 
         try {
-            const todayStr = getFormattedDate(new Date());
-            
-            const states = await getDocs(collection(db,'examUnits'));
-            const openUnits = states.docs.map(d => ({...d.data(),unitId:d.id})).filter(isDue);
-            const recordsSnap = await getDocs(collection(db,'records'));
-            const submitted = recordsSnap.docs.map(d=>d.data());
-            const examDates = openUnits.map(u=>u.unitId);
-
-
-            let studentAbsentMap = {};
-
-            studentDirectory.forEach(student => {
-                const normalizedName = normalizeLoginValue(student.name);
-                const studentKey = `${student.hr}__${normalizedName}`;
-                
-                examDates.forEach(dateStr => {
-                    if(!classCanAccess(openUnits.find(u=>u.unitId===dateStr),student.hr)) return;
-                    if (!submitted.some(r => (r.unitId===dateStr || (r.book && r.unit && unitKey(r.book,r.unit)===dateStr)) && normalizeLoginValue(r.studentName)===normalizedName && getStudentHR(r.studentName,r.studentHR)===student.hr)) {
-                        if (!studentAbsentMap[studentKey]) {
-                            studentAbsentMap[studentKey] = {
-                                name: student.name,
-                                hr: student.hr,
-                                dates: []
-                            };
-                        }
-                        const state = openUnits.find(u=>u.unitId===dateStr);
-                        studentAbsentMap[studentKey].dates.push(`${unitLabel(state.book,state.unit)} (Opened: ${state.openedDate})`);
-                    }
-                });
+            await refreshPolicyData();
+            const states=statesForPolicy();
+            const examDates=states.filter(state=>examWindow(state) && Date.now()>=examWindow(state).end).map(state=>state.unitId);
+            const studentAbsentMap={};
+            studentDirectory.forEach(student=>{
+                const entries=absenceEntries(student,states,unitRecords,examStarts).filter(entry=>entry.status==='pending');
+                if(entries.length) studentAbsentMap[`${student.hr}__${normalizeLoginValue(student.name)}`]={
+                    name:student.name,hr:student.hr,
+                    dates:entries.sort((a,b)=>a.date.localeCompare(b.date)).map(entry=>`${entry.date} · ${unitLabel(entry.book,entry.unit)}`)
+                };
             });
-
             let absentList = Object.values(studentAbsentMap).map(student => {
                 return {
                     name: student.name,
@@ -1705,7 +1896,7 @@
 
         let tableHtml = `
             <div style="background:#fff; padding:16px; border-radius:10px; border:1px solid #e2e8f0; text-align:center;">
-                <div class="report-heading"><h3 style="color:var(--purple-color); margin-bottom:12px; font-size:1.15rem;">⛔ Absent List Track (Total Exams: ${totalExamsCount})</h3><button class="print-report-button" aria-label="Print Absent List as PDF" title="Print / Save as PDF" onclick="printTrackReport('Absent List Track')">🖨️</button></div>
+                <div class="report-heading"><h3 style="color:var(--purple-color); margin-bottom:12px; font-size:1.15rem;">⛔ Absent List (Total Exams: ${totalExamsCount})</h3><button class="print-report-button" aria-label="Print Absent List as PDF" title="Print / Save as PDF" onclick="printTrackReport('Absent List')">🖨️</button></div>
                 <table style="width:100%; border-collapse:collapse; text-align:center; font-size:0.95rem;">
                     <thead>
                         <tr style="background:#f3e8ff; border-bottom:2px solid #d8b4fe; color:#6b21a8;">
@@ -1718,7 +1909,7 @@
         `;
 
         if (absentList.length === 0) {
-            tableHtml += `<tr><td colspan="3" style="padding:16px; color:#16a34a; font-weight:700;">🎉 Great! All students have completed all exams to date.</td></tr>`;
+            tableHtml += `<tr><td colspan="3" style="padding:16px; color:#16a34a; font-weight:700;">No pending absences were found for exams whose scheduled end time has passed.</td></tr>`;
         } else {
             const classCounts = absentList.reduce((counts, row) => {
                 counts[row.hr] = (counts[row.hr] || 0) + 1;
@@ -2227,17 +2418,12 @@
         try {
             if(isCorrection) {
                 if(!correctionRecord || !isMine(correctionRecord) || !(correctionRecord.unitId===unitKey(book,unit) || (Number(correctionRecord.book)===Number(book) && Number(correctionRecord.unit)===Number(unit)))) throw new Error('Correction record unavailable.');
-            } else {
-                const state=await getDocFromServer(doc(db,'examUnits',unitKey(book,unit)));
-                if(!state.exists() || !isDue(state.data()) || !classCanAccess(state.data(),currentUserHR)) throw new Error('This unit is not available for your class.');
             }
             const exam=await loadUnitExam(book,unit);
-            if(!isCorrection) {
-                const latestState=await getDocFromServer(doc(db,'examUnits',unitKey(book,unit)));
-                if(!latestState.exists() || !isDue(latestState.data()) || !classCanAccess(latestState.data(),currentUserHR)) throw new Error('This unit is not available for your class at this time.');
-            }
+            const admission=isCorrection ? null : await authorizeExamStart(book,unit);
+            if(!isCorrection && !admission) return;
             activeUnit={book,unit,unitId:unitKey(book,unit)};
-            activeRecord=isCorrection ? structuredClone(correctionRecord) : {recordId:doc(collection(db,'records')).id,studentName:currentUser,studentHR:currentUserHR,c_name:studentDirectory.find(s=>s.name===currentUser && s.hr===currentUserHR)?.c_name || '',...activeUnit,date:getFormattedDate(),score:0,totalPossible:0,details:[]};
+            activeRecord=isCorrection ? structuredClone(correctionRecord) : {...admission,recordId:admission.recordId,studentName:currentUser,studentHR:currentUserHR,c_name:studentDirectory.find(s=>s.name===currentUser && s.hr===currentUserHR)?.c_name || '',...activeUnit,date:getFormattedDate(),score:0,totalPossible:0,details:[]};
             if(isCorrection && !activeRecord) throw new Error('Correction record unavailable.');
             currentExamData=exam; sectionDefs=exam.sectionDefs || {}; isCorrectionMode=isCorrection;
             questions=isCorrection ? exam.questions.filter(q=>activeRecord.details.some(d=>d.id===q.id && !d.isCorrect)) : exam.questions;
@@ -2663,7 +2849,7 @@
         if (savingResult) return;
         savingResult = true;
         let studentRecord = structuredClone(activeRecord);
-        if (!isCorrectionMode) {studentRecord.date=getFormattedDate();studentRecord.submittedAt=new Date().toISOString();}
+        if (!isCorrectionMode) {studentRecord.date=activeRecord.submittedAt ? activeRecord.date : getFormattedDate();studentRecord.submittedAt=activeRecord.submittedAt || new Date().toISOString();activeRecord.date=studentRecord.date;activeRecord.submittedAt=studentRecord.submittedAt;}
         else studentRecord.correctedAt=new Date().toISOString();
         const targetDate=studentRecord.date;
 
@@ -2961,7 +3147,7 @@ window.exportWeeklyWord=async button=>{
     window.printTrackReport=printTrackReport;
     async function collectDatabaseBackup() {
         const startedAt=new Date().toISOString();
-        const names=['records','examUnits','exams'];
+        const names=['records','examUnits','exams','examStarts','makeupAdmin','makeupChecks'];
         const snapshots=await Promise.all(names.map(name=>getDocsFromServer(collection(db,name))));
         const collections={};
         const counts={};
@@ -2972,7 +3158,7 @@ window.exportWeeklyWord=async button=>{
         });
         return {format:'LUYA-database-backup',version:1,projectId:firebaseConfig.projectId,
             startedAt,completedAt:new Date().toISOString(),counts,collections,
-            scope:'All top-level documents in records, examUnits and exams; no date or class filters.',
+            scope:'All exam records, schedules, participation entries and private make-up settings; no date or class filters.',
             excluded:['Authentication accounts','Firestore rules and indexes','subcollections','website files and Excel question files'],
             restoreNote:'Application JSON backup. Restore with a compatible import tool; not a Firebase managed-export file.'};
     }
@@ -3026,18 +3212,22 @@ window.exportWeeklyWord=async button=>{
             const link=document.createElement('a');
             link.href=url;link.download=filename;document.body.appendChild(link);link.click();link.remove();
             setTimeout(()=>URL.revokeObjectURL(url),30000);
-            status.textContent=`Backup download started: ${backup.counts.records} records, ${backup.counts.examUnits} unit settings, ${backup.counts.exams} legacy exams. Check your Downloads folder before deleting any data.`;
+            status.textContent=`Backup download started: ${backup.counts.records} records, ${backup.counts.examUnits} unit settings, ${backup.counts.exams} legacy exams, ${backup.counts.examStarts} participation entries, and private make-up settings. Check your Downloads folder before deleting any data.`;
         } catch(error) {
             console.error('Database backup failed:',error);
             status.textContent=`Backup failed; no backup file was generated. ${error.message}`;
         } finally {button.disabled=false;}
     }
     window.backupDatabase=backupDatabase;
-    const BACKUP_COLLECTIONS=['records','examUnits','exams'];
+    const BACKUP_COLLECTIONS=['records','examUnits','exams','examStarts','makeupAdmin','makeupChecks'];
     function validateBackupFile(backup) {
         if(backup?.format!=='LUYA-database-backup' || backup.version!==1 || backup.projectId!==firebaseConfig.projectId)
             throw new Error('This is not a compatible backup for this Firebase project.');
         if(!backup.completedAt || !Number.isFinite(Date.parse(backup.completedAt))) throw new Error('Invalid backup date.');
+        const addedCollections=['examStarts','makeupAdmin','makeupChecks'];
+        if(backup.collections && backup.counts && addedCollections.every(name=>!(name in backup.collections))) {
+            for(const name of addedCollections) {backup.collections[name]=[];backup.counts[name]=0;}
+        }
         if(!backup.collections || Object.keys(backup.collections).some(name=>!BACKUP_COLLECTIONS.includes(name))) throw new Error('Unexpected collections in backup.');
         for(const name of BACKUP_COLLECTIONS) {
             const rows=backup.collections[name];
