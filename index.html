@@ -51,6 +51,17 @@
             backdrop-filter: blur(8px);
         }
 
+        .login-footer {
+            margin-top: 24px;
+            padding-top: 16px;
+            border-top: 1px solid var(--border-color);
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            line-height: 1.5;
+        }
+        #screen-login.hidden ~ .login-footer { display: none; }
+
         /* Header Layout */
         .header-container {
             display: grid;
@@ -662,6 +673,7 @@
         <div id="result-list"></div>
         <button id="btn-return-menu" class="btn" onclick="returnToMenu()" style="margin-top: 18px;">Return to Menu</button>
     </div>
+    <footer class="login-footer">Coded by Mr. Huang with Codex AI</footer>
 </div>
 
 <!-- Custom Date Range Modal -->
