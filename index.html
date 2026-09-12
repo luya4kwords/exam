@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Online Examination System</title>
-    <link rel="icon" type="image/png" sizes="32x32" href="/favicon.png">
+    <link rel="icon" type="image/svg+xml" sizes="any" href="favicon.svg?v=20260913-4">
     <!-- SheetJS CDN for parsing Excel files -->
     <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
     <style>
@@ -1252,7 +1252,7 @@ function hasParticipation(state,records,attempts=[]) {
 }
 function mayReplaceSchedule(state,records,attempts=[],now=Date.now()) {
     const phase=examPhase(state,now);
-    return !hasParticipation(state,records,attempts) && phase!=='active';
+    return !state?.hasParticipation && !hasParticipation(state,records,attempts);
 }
 function makeupHosts(states,now=Date.now()) {
     return states.filter(state=>state.generateMakeupCode===true && examPhase(state,now)==='active');
@@ -1359,15 +1359,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         examStarts.push({...result,id:attemptId});
         return result;
     }
-    async function saveScheduledUnit(book,unit,classes,schedule) {
-        const key=unitKey(book,unit);
-        await refreshPolicyData();
-        const before=policyState(book,unit);
-        if(!mayReplaceSchedule(before,unitRecords,examStarts) || before.hasParticipation)
-            throw new Error('This schedule is locked. Exams in progress cannot be changed. After participation, use make-up exams.');
-        if(!schedule?.scheduleEnabled || Date.parse(schedule.endsAt)<=Date.now()) throw new Error('Please set a future end time.');
-        await loadUnitExam(book,unit);
-        const codeEnabled=document.getElementById('generate-makeup-code').checked;
+    let makeupDraft=null, makeupPreviewVersion=0;
+    function planMakeupCode(key,before,schedule) {
         // Find the connected group of overlapping enabled windows. Adjacent windows
         // are separate sessions; editing the same interval keeps its existing code.
         const peers=statesForPolicy().filter(u=>u.unitId!==key && u.generateMakeupCode && u.isOpen===true && Date.parse(u.endsAt)>Date.now());
@@ -1380,9 +1373,37 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             }
         }
         const unchanged=before.generateMakeupCode && before.startsAt===schedule.startsAt && before.endsAt===schedule.endsAt;
-        const sessionId=group.find(u=>u.makeupSessionId)?.makeupSessionId || (unchanged && before.makeupSessionId) || Array.from(crypto.getRandomValues(new Uint8Array(16)),v=>v.toString(16).padStart(2,'0')).join('');
+        const candidateId=group.find(u=>u.makeupSessionId)?.makeupSessionId || (unchanged && before.makeupSessionId) || Array.from(crypto.getRandomValues(new Uint8Array(16)),v=>v.toString(16).padStart(2,'0')).join('');
+        const draftKey=JSON.stringify([key,schedule.startsAt,schedule.endsAt,group.map(u=>[u.unitId,u.makeupSessionId])]);
+        if(!makeupDraft || makeupDraft.key!==draftKey) makeupDraft={key:draftKey,sessionId:candidateId,code:sixDigitCode()};
+        return {group,sessionId:makeupDraft.sessionId,proposedCode:makeupDraft.code};
+    }
+    async function previewMakeupCode() {
+        const version=++makeupPreviewVersion;
+        const box=document.getElementById('makeup-code-display');
+        if(!pendingUnitClasses || savingUnitClasses || !document.getElementById('generate-makeup-code').checked) {box.textContent='';return;}
+        const {book,unit}=pendingUnitClasses;
+        try {
+            const schedule=readUnitSchedule();
+            const plan=planMakeupCode(unitKey(book,unit),policyState(book,unit),schedule);
+            box.textContent='Preparing code…';
+            const existing=await getDocFromServer(doc(db,'makeupAdmin',plan.sessionId));
+            if(version!==makeupPreviewVersion || !pendingUnitClasses) return;
+            box.textContent=`Make-up Code: ${existing.exists() ? existing.data().code : plan.proposedCode}`;
+            document.getElementById('unit-schedule-notice').textContent='Click Save Availability to apply this schedule and code.';
+        } catch(error) {if(version===makeupPreviewVersion) box.textContent='Please check the dates and connection, then try again.';}
+    }
+    async function saveScheduledUnit(book,unit,classes,schedule) {
+        const key=unitKey(book,unit);
+        await refreshPolicyData();
+        const before=policyState(book,unit);
+        if(!mayReplaceSchedule(before,unitRecords,examStarts) || before.hasParticipation)
+            throw new Error('This schedule is locked because a student has started or completed the exam. Use make-up exams instead.');
+        if(!schedule?.scheduleEnabled || Date.parse(schedule.endsAt)<=Date.now()) throw new Error('Please set a future end time.');
+        await loadUnitExam(book,unit);
+        const codeEnabled=document.getElementById('generate-makeup-code').checked;
+        const {group,sessionId,proposedCode}=planMakeupCode(key,before,schedule);
         const control=doc(db,'makeupAdmin',sessionId);
-        const proposedCode=sixDigitCode();
         const unitRef=doc(db,'examUnits',key);
         const saved=await runTransaction(db,async transaction=>{
             const old=await transaction.get(unitRef);
@@ -1465,7 +1486,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         let schedule;
         try {schedule=keepOpen ? readUnitSchedule() : null;} catch(error) {alert(error.message);return;}
         const {book,unit}=pendingUnitClasses;
-        let makeupMessage='';
+        ++makeupPreviewVersion;
         savingUnitClasses=true;
         document.getElementById('unit-class-confirm').disabled=true;
         document.getElementById('unit-class-cancel').disabled=true;
@@ -1473,9 +1494,13 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         try {
             const saved=await persistUnitState(book,unit,{disabled:false},classes,keepOpen,schedule);
             if(saved) {
-                makeupMessage=saved.makeupMessage || '';
-                pendingUnitClasses=null;
-                document.getElementById('modal-unit-classes').classList.add('hidden');
+                if(saved.makeupMessage) {
+                    document.getElementById('unit-schedule-notice').textContent='Saved. This code is valid during the scheduled session.';
+                    document.getElementById('unit-class-cancel').textContent='Close';
+                } else {
+                    pendingUnitClasses=null;
+                    document.getElementById('modal-unit-classes').classList.add('hidden');
+                }
             }
         } finally {
             savingUnitClasses=false;
@@ -1483,8 +1508,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             document.getElementById('unit-class-cancel').disabled=false;
             document.getElementById('unit-class-off').disabled=false;
         }
-        // The editor must close and release its buttons before another modal is shown.
-        if(makeupMessage) await confirmDatabaseWarning(makeupMessage,'Make-up Code',true);
+
     }
     window.closeUnitClasses=closeUnitClasses;
     window.confirmUnitClasses=confirmUnitClasses;
@@ -1625,6 +1649,9 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             document.querySelectorAll('#unit-schedule-fields input,#unit-schedule-fields select,#unit-class-options input').forEach(el=>el.disabled=locked);
             const generate=document.getElementById('generate-makeup-code');
             generate.checked=state.generateMakeupCode===true;generate.disabled=locked;
+            generate.onchange=previewMakeupCode;
+            document.querySelectorAll('#unit-schedule-fields input,#unit-schedule-fields select').forEach(el=>el.onchange=()=>{if(!locked) void previewMakeupCode();});
+            document.getElementById('unit-class-cancel').textContent='Cancel';
             document.getElementById('unit-class-confirm').disabled=locked;
             document.getElementById('unit-schedule-notice').textContent=locked
                 ? 'Schedule locked. Existing participants keep their original exam. Missing students must use a supervised make-up session.'
@@ -1653,9 +1680,9 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             if(records.some(r=>recordDetails(r).some(d=>!d.isCorrect))) corrections=true;
             if(absenceEntries(currentStudent(),[{...state,book,unit,unitId:key}],unitRecords,examStarts).some(e=>e.status==='pending')) missed=true;
         }
-        return corrections && missed ? 'You have corrections and missed tests to complete. Please correct your mistakes and take any tests you missed.'
-            : corrections ? 'You have mistakes to correct. Please complete your corrections.'
-            : missed ? 'You have missed a test. Please take the test.' : '';
+        return corrections && missed ? 'You have pending corrections and missed tests. Please complete your corrections and ask your teacher to arrange a make-up exam.'
+            : corrections ? 'You have pending corrections. Please complete them as soon as possible.'
+            : missed ? 'You have missed one or more tests. Please ask your teacher to arrange a make-up exam.' : '';
     }
     async function showStudentReminder() {
         const message=studentReminderMessage();
