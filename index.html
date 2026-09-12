@@ -1311,7 +1311,9 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         box.textContent='';
         if(!isAdmin) return;
         try {
-            const snap=await getDocFromServer(doc(db,'makeupAdmin','current'));
+            const selected=pendingUnitClasses ? unitStates[unitKey(pendingUnitClasses.book,pendingUnitClasses.unit)] : null;
+            if(!selected?.generateMakeupCode) return;
+            const snap=await getDocFromServer(doc(db,'makeupAdmin',selected?.makeupSessionId || 'current'));
             if(snap.exists()) box.textContent=`Make-up Code: ${snap.data().code}`;
         } catch(error) {box.textContent='Code unavailable. Check the updated Firestore rules.';}
     }
@@ -1366,12 +1368,27 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         if(!schedule?.scheduleEnabled || Date.parse(schedule.endsAt)<=Date.now()) throw new Error('Please set a future end time.');
         await loadUnitExam(book,unit);
         const codeEnabled=document.getElementById('generate-makeup-code').checked;
-        const control=doc(db,'makeupAdmin','current');
+        // Find the connected group of overlapping enabled windows. Adjacent windows
+        // are separate sessions; editing the same interval keeps its existing code.
+        const peers=statesForPolicy().filter(u=>u.unitId!==key && u.generateMakeupCode && u.isOpen===true && Date.parse(u.endsAt)>Date.now());
+        let start=Date.parse(schedule.startsAt),end=Date.parse(schedule.endsAt),group=[];
+        let expanded=true;
+        while(expanded) {
+            expanded=false;
+            for(const peer of peers) if(!group.includes(peer) && Date.parse(peer.startsAt)<end && Date.parse(peer.endsAt)>start) {
+                group.push(peer);start=Math.min(start,Date.parse(peer.startsAt));end=Math.max(end,Date.parse(peer.endsAt));expanded=true;
+            }
+        }
+        const unchanged=before.generateMakeupCode && before.startsAt===schedule.startsAt && before.endsAt===schedule.endsAt;
+        const sessionId=group.find(u=>u.makeupSessionId)?.makeupSessionId || (unchanged && before.makeupSessionId) || Array.from(crypto.getRandomValues(new Uint8Array(16)),v=>v.toString(16).padStart(2,'0')).join('');
+        const control=doc(db,'makeupAdmin',sessionId);
+        const proposedCode=sixDigitCode();
         const unitRef=doc(db,'examUnits',key);
         const saved=await runTransaction(db,async transaction=>{
             const old=await transaction.get(unitRef);
             const prior=old.exists() ? {...old.data(),unitId:key} : {unitId:key,book,unit};
             const codeDoc=codeEnabled ? await transaction.get(control) : null;
+            const peerDocs=codeEnabled ? await Promise.all(group.map(u=>transaction.get(doc(db,'examUnits',u.unitId)))) : [];
             if(prior.hasParticipation || !mayReplaceSchedule(prior,unitRecords,examStarts)) throw new Error('This schedule was locked by a new exam start. Refresh and try again.');
             const state={...prior,...schedule,book,unit,isOpen:true,examClasses:classes,allowedClasses:classes,
                 openedDate:taiwanDateTime(schedule.startsAt).slice(0,10),
@@ -1380,14 +1397,21 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 availabilityHistory:[{startsAt:schedule.startsAt,endsAt:schedule.endsAt}]};
             delete state.unitId;
             if(codeEnabled) {
-                const otherWindow=statesForPolicy().some(u=>u.generateMakeupCode && Date.parse(u.endsAt)>Date.now());
-                const code=codeDoc.exists() && otherWindow ? codeDoc.data().code : sixDigitCode();
+                const code=codeDoc.exists() ? codeDoc.data().code : proposedCode;
+                state.makeupSessionId=sessionId;
                 transaction.set(control,{code,updatedAt:new Date().toISOString()});
+                peerDocs.forEach((snapshot,index)=>{
+                    const peer=snapshot.data();
+                    if(!snapshot.exists() || peer.startsAt!==group[index].startsAt || peer.endsAt!==group[index].endsAt || !peer.generateMakeupCode)
+                        throw new Error('Another schedule changed. Please refresh and save again.');
+                    transaction.update(doc(db,'examUnits',group[index].unitId),{makeupSessionId:sessionId});
+                });
             }
             transaction.set(unitRef,state);
             return state;
         });
         unitStates[key]=saved;drawUnits();
+        if(codeEnabled) group.forEach(u=>{unitStates[u.unitId].makeupSessionId=sessionId;});
         if(codeEnabled) {
             await showSharedMakeupCode();
             return {makeupMessage:document.getElementById('makeup-code-display').textContent+'\n\nThis code works for all eligible make-up units during enabled supervised sessions.'};
@@ -2701,7 +2725,11 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         if(!fullscreenElement()) {
             const request=document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen;
             if(!request) throw new Error('This browser does not support fullscreen mode. Please use a browser that supports fullscreen mode to take this exam.');
-            await request.call(document.documentElement);
+            try {await request.call(document.documentElement);}
+            catch(error) {
+                console.warn('Fullscreen request was not accepted:',error);
+                throw new Error('Please click “Enter Fullscreen” to continue your exam. If fullscreen mode is still unavailable, ask your teacher for help.');
+            }
         }
         if(!fullscreenElement()) throw new Error('Please enter fullscreen mode before starting the exam.');
     }
@@ -2729,8 +2757,9 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         if(isCorrectionMode) return;
         if(locked) {retryLockedSubmission();return;}
         guardMessage('You must stay in fullscreen mode and keep the exam window active throughout the exam. Switching tabs or windows, clicking outside the exam window, or exiting fullscreen counts as a violation.\n\nThe first violation will trigger a warning. A second violation will immediately submit your exam automatically.\n\nClick “Enter Fullscreen” to start or continue.');
-        // A fresh click is required if asynchronous loading consumed user activation.
-        guardButton.click();
+        // A simulated click cannot restore user activation after loading or code verification.
+        // Keep the instructions visible and wait for a real click in that case.
+        if(fullscreenElement() || (typeof navigator!=='undefined' && navigator.userActivation?.isActive)) guardButton.click();
     }
     function stopExamGuard() {
         examGuard.active=false;
