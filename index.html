@@ -700,8 +700,21 @@
     </div>
 </div>
 <div id="modal-unit-classes" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="unit-classes-title">
-    <div class="modal-card">
+    <div class="modal-card" style="max-height:90vh;overflow-y:auto;">
         <h3 id="unit-classes-title" class="modal-title"></h3>
+        <fieldset style="margin:12px 0;padding:12px;border:1px solid #cbd5e1;border-radius:8px;">
+            <legend>Availability Schedule</legend>
+            <label><input id="unit-schedule-enabled" type="checkbox"> Enable schedule</label>
+            <p style="font-size:0.85rem;margin:8px 0;">Taiwan time (UTC+08:00). The schedule applies only to formal exams. Corrections remain available at any time. Exams already in progress may finish.</p>
+            <div id="unit-schedule-fields">
+                <label for="unit-start-date">Start date</label>
+                <input id="unit-start-date" type="date" style="width:100%;margin:4px 0 8px;">
+                <div><label for="unit-start-hour">Start time</label> <select id="unit-start-hour" aria-label="Start hour"></select> : <select id="unit-start-minute" aria-label="Start minute"></select></div>
+                <label for="unit-end-date" style="display:block;margin-top:10px;">End date</label>
+                <input id="unit-end-date" type="date" style="width:100%;margin:4px 0 8px;">
+                <div><label for="unit-end-hour">End time</label> <select id="unit-end-hour" aria-label="End hour"></select> : <select id="unit-end-minute" aria-label="End minute"></select></div>
+            </div>
+        </fieldset>
         <button id="unit-class-off" class="btn btn-inline btn-danger hidden" style="margin-bottom:12px;" onclick="confirmUnitClasses(false)">Off</button>
         <p style="margin-bottom:12px;">Select classes eligible for this exam.</p>
         <div id="unit-class-options" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;max-height:280px;overflow-y:auto;"></div>
@@ -765,7 +778,7 @@
 <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
     import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, setPersistence, browserSessionPersistence } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
-    import { getFirestore, doc, setDoc, getDoc, collection, getDocs, getDocsFromServer, writeBatch } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+    import { getFirestore, doc, setDoc, getDoc, getDocFromServer, collection, getDocs, getDocsFromServer, writeBatch } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
 
     const firebaseConfig = {
         apiKey: "AIzaSyAbpAnc5Ub9mGGm5kUgP3jCKXwAnZONwrE",
@@ -1100,7 +1113,55 @@
     const recordDetails = r => Array.isArray(r?.details) ? r.details.filter(d => d && typeof d === 'object') : [];
     const recordTime = r => typeof r.submittedAt === 'string' ? r.submittedAt : typeof r.date === 'string' ? r.date : '';
     const isMine = r => normalizeLoginValue(r.studentName) === normalizeLoginValue(currentUser) && getStudentHR(r.studentName,r.studentHR) === currentUserHR;
-    const isDue = state => state && state.isOpen === true && /^\d{4}-\d{2}-\d{2}$/.test(state.openedDate) && state.openedDate <= getFormattedDate();
+    function isDue(state, now=Date.now()) {
+        if(!state || state.isOpen!==true) return false;
+        if(state.scheduleEnabled===true) {
+            const start=Date.parse(state.startsAt), end=Date.parse(state.endsAt);
+            return Number.isFinite(start) && Number.isFinite(end) && start<end && now>=start && now<end;
+        }
+        return /^\d{4}-\d{2}-\d{2}$/.test(state.openedDate) && state.openedDate<=getFormattedDate();
+    }
+    function taiwanDateTime(value=Date.now()) {
+        return new Date(new Date(value).getTime()+8*60*60*1000).toISOString().slice(0,16);
+    }
+    function scheduleLabel(state) {
+        if(!state?.scheduleEnabled) return '';
+        const start=Date.parse(state.startsAt),end=Date.parse(state.endsAt);
+        if(!Number.isFinite(start) || !Number.isFinite(end)) return 'Invalid schedule';
+        const status=!state.isOpen ? 'Off' : Date.now()<start ? 'Scheduled' : Date.now()>=end ? 'Ended' : 'Open';
+        return `${status}: ${taiwanDateTime(start).replace('T',' ')} – ${taiwanDateTime(end).replace('T',' ')} (Taiwan)`;
+    }
+    function populateUnitSchedule(state) {
+        document.getElementById('unit-schedule-enabled').checked=state.scheduleEnabled===true;
+        for(const side of ['start','end']) {
+            const stored=side==='start' ? state.startsAt : state.endsAt;
+            const date=taiwanDateTime(Number.isFinite(Date.parse(stored)) ? stored : Date.now()+(side==='end' ? 3600000 : 0));
+            document.getElementById(`unit-${side}-date`).value=date.slice(0,10);
+            for(const [part,max,value] of [['hour',24,date.slice(11,13)],['minute',60,date.slice(14,16)]]) {
+                const select=document.getElementById(`unit-${side}-${part}`);
+                select.replaceChildren();
+                for(let i=0;i<max;i++) {const v=String(i).padStart(2,'0');select.add(new Option(v,v));}
+                select.value=value;
+            }
+        }
+        const toggle=()=>document.querySelectorAll('#unit-schedule-fields input, #unit-schedule-fields select').forEach(el=>el.disabled=!document.getElementById('unit-schedule-enabled').checked);
+        document.getElementById('unit-schedule-enabled').onchange=toggle;
+        toggle();
+    }
+    function readUnitSchedule() {
+        if(!document.getElementById('unit-schedule-enabled').checked) return {scheduleEnabled:false,startsAt:null,endsAt:null};
+        const values=['start','end'].map(side=>{
+            const date=document.getElementById(`unit-${side}-date`).value;
+            const hour=document.getElementById(`unit-${side}-hour`).value;
+            const minute=document.getElementById(`unit-${side}-minute`).value;
+            const time=Date.parse(`${date}T${hour}:${minute}:00+08:00`);
+            if(!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(time) || taiwanDateTime(time)!==`${date}T${hour}:${minute}`) throw new Error('Please select valid start and end dates and times.');
+            return time;
+        });
+        if(values[1]<=values[0]) throw new Error('The end date and time must be later than the start date and time.');
+        return {scheduleEnabled:true,startsAt:new Date(values[0]).toISOString(),endsAt:new Date(values[1]).toISOString()};
+    }
+
     // Unconfigured older units are hidden until Administrator chooses classes.
     const classCanAccess = (state, hr) => Array.isArray(state?.allowedClasses) && state.allowedClasses.includes(String(hr).trim());
     let pendingUnitClasses=null, savingUnitClasses=false;
@@ -1113,13 +1174,15 @@
         if(!isAdmin || !pendingUnitClasses || savingUnitClasses) return;
         const classes=getSelectedLeaderboardClasses('unit-class-options');
         if(keepOpen && !classes.length) {alert('Please select at least one class.');return;}
+        let schedule;
+        try {schedule=keepOpen ? readUnitSchedule() : null;} catch(error) {alert(error.message);return;}
         const {book,unit}=pendingUnitClasses;
         savingUnitClasses=true;
         document.getElementById('unit-class-confirm').disabled=true;
         document.getElementById('unit-class-cancel').disabled=true;
         document.getElementById('unit-class-off').disabled=true;
         try {
-            const saved=await persistUnitState(book,unit,{disabled:false},classes,keepOpen);
+            const saved=await persistUnitState(book,unit,{disabled:false},classes,keepOpen,schedule);
             if(saved) {
                 pendingUnitClasses=null;
                 document.getElementById('modal-unit-classes').classList.add('hidden');
@@ -1180,6 +1243,24 @@
         await Promise.allSettled([stateTask, recordTask]);
         notice.textContent = errors.join(' ');
     }
+    let availabilitySignature='', scheduleSyncBusy=false;
+    setInterval(()=>{
+        if(!currentUser || !unitStatesLoaded || isExamActive || loadingExam || savingResult) return;
+        const signature=JSON.stringify(Object.entries(unitStates).map(([key,state])=>[key,isDue(state),state.scheduleEnabled && Date.now()>=Date.parse(state.endsAt)]));
+        if(signature!==availabilitySignature) {availabilitySignature=signature;drawUnits();if(!isAdmin) checkStudentUnitExam();}
+    },1000);
+    setInterval(async()=>{
+        if(!currentUser || !unitStatesLoaded || isExamActive || loadingExam || savingResult || savingUnitClasses || pendingUnitClasses || scheduleSyncBusy) return;
+        scheduleSyncBusy=true;
+        try {
+            const states=await getDocsFromServer(collection(db,'examUnits'));
+            // Do not overwrite newer local edits if an administrator opened the editor meanwhile.
+            if(savingUnitClasses || pendingUnitClasses || isExamActive) return;
+            const fresh=Object.fromEntries(states.docs.map(d=>[d.id,d.data()]));
+            if(JSON.stringify(fresh)!==JSON.stringify(unitStates)) {unitStates=fresh;drawUnits();if(!isAdmin) checkStudentUnitExam();}
+        } catch(error) {console.warn('Availability refresh failed:',error);}
+        finally {scheduleSyncBusy=false;}
+    },30000);
     function drawUnits() {
         const host = document.getElementById(isAdmin ? 'admin-units' : 'student-units');
         host.replaceChildren();
@@ -1191,13 +1272,13 @@
             for(let unit=1;unit<=30;unit++) {
                 const key=unitKey(book,unit), state=unitStates[key] || {};
                 const permitted=isAdmin || classCanAccess(state,currentUserHR);
-                const displayOpen=state.isOpen === true && permitted;
+                const displayOpen=isDue(state) && permitted;
                 const records=unitRecords.filter(r => (r.unitId===key || (r.book===book && r.unit===unit)) && isMine(r));
                 const pending=records.some(r => recordDetails(r).some(d => !d.isCorrect));
-                const icon=isAdmin || !unitRecordsLoaded || !permitted ? '' : pending ? '❌' : records.length ? '👍' : isDue(state) ? '⛔' : '';
+                const icon=isAdmin || !unitRecordsLoaded ? '' : pending ? '❌' : records.length ? '👍' : permitted && isDue(state) ? '⛔' : '';
                 const card=document.createElement('div');card.className='unit-card'+(book===selectedBook && unit===selectedUnit ? ' selected':'');
-                card.innerHTML=`<div class="unit-heading"><button class="unit-name ${displayOpen ? 'open':''}">${icon}Unit${String(unit).padStart(2,'0')}</button>${isAdmin ? `<button class="unit-switch" role="switch" aria-label="${unitLabel(book,unit)}" aria-checked="${state.isOpen===true}">${state.isOpen ? 'On':'Off'}</button>` : ''}</div><div class="unit-date"></div>`;
-                card.querySelector('.unit-date').textContent=displayOpen && typeof state.openedDate === 'string' ? state.openedDate.replaceAll('-','.') : '';
+                card.innerHTML=`<div class="unit-heading"><button class="unit-name ${displayOpen ? 'open':''}">${icon}Unit${String(unit).padStart(2,'0')}</button>${isAdmin ? `<button class="unit-switch" role="switch" aria-label="${unitLabel(book,unit)}" aria-checked="${state.isOpen===true}">${!state.isOpen ? 'Off' : state.scheduleEnabled ? (isDue(state) ? 'Open' : Date.now()<Date.parse(state.startsAt) ? 'Scheduled' : 'Ended') : 'On'}</button>` : ''}</div><div class="unit-date"></div>`;
+                card.querySelector('.unit-date').textContent=permitted && state.scheduleEnabled ? scheduleLabel(state) : displayOpen && typeof state.openedDate === 'string' ? state.openedDate.replaceAll('-','.') : '';
                 card.onclick=()=> {
                     selectedBook=book;selectedUnit=unit;
                     // Keep the clicked element alive so the browser can detect a double click.
@@ -1225,15 +1306,16 @@
             boxes.forEach(box=>{box.checked=(state.allowedClasses || []).includes(box.value);});
             document.getElementById('unit-class-options-class-all').checked=boxes.length>0 && boxes.every(box=>box.checked);
             pendingUnitClasses={book,unit};
+            populateUnitSchedule(state);
             document.getElementById('unit-classes-title').textContent=`📚 ${unitLabel(book,unit)}`;
             document.getElementById('unit-class-off').classList.toggle('hidden',!state.isOpen);
-            document.getElementById('unit-class-confirm').textContent=state.isOpen ? 'Save Classes' : 'Open Unit';
+            document.getElementById('unit-class-confirm').textContent='Save Availability';
             document.getElementById('modal-unit-classes').classList.remove('hidden');
             document.getElementById('unit-class-confirm').focus();
             return;
         }
     }
-    async function persistUnitState(book,unit,button,allowedClasses=[],desiredOpen=null) {
+    async function persistUnitState(book,unit,button,allowedClasses=[],desiredOpen=null,schedule=null) {
         if(!isAdmin || button.disabled) return;
         button.disabled=true;
         const key=unitKey(book,unit), wasOpen=unitStates[key]?.isOpen===true;
@@ -1259,7 +1341,7 @@
                 if(!hasAttempts) openedDate=getFormattedDate();
                 else if(!openedDate) throw new Error('This unit has exam records but no original opening date. Restore its opening date before reopening.');
             }
-            const state={book,unit,isOpen:opening,allowedClasses:opening ? allowedClasses : (unitStates[key]?.allowedClasses || []),openedDate,updatedAt:new Date().toISOString()};
+            const state={...unitStates[key],...(schedule || {}),book,unit,isOpen:opening,allowedClasses:opening ? allowedClasses : (unitStates[key]?.allowedClasses || []),openedDate,updatedAt:new Date().toISOString()};
             await setDoc(doc(db,'examUnits',key),state);
             unitStates[key]=state; drawUnits();
             return true;
@@ -1275,10 +1357,9 @@
         const today=getFormattedDate();
         for(let book=1;book<=6;book++) for(let unit=1;unit<=30;unit++) {
             const key=unitKey(book,unit), state=unitStates[key];
-            if(!isDue(state) || !classCanAccess(state,currentUserHR)) continue;
             const records=unitRecords.filter(r=>isMine(r) && (r.unitId===key || (Number(r.book)===book && Number(r.unit)===unit)));
             if(records.some(r=>recordDetails(r).some(d=>!d.isCorrect))) corrections=true;
-            if(state.openedDate<today && !records.length) missed=true;
+            if(isDue(state) && classCanAccess(state,currentUserHR) && state.openedDate<today && !records.length) missed=true;
         }
         return corrections && missed ? 'You have corrections and missed tests to complete. Please correct your mistakes and take any tests you missed.'
             : corrections ? 'You have mistakes to correct. Please complete your corrections.'
@@ -1293,19 +1374,19 @@
     async function openStudentUnit(book,unit) {
         if(isAdmin || openingStudentUnit || !unitStatesLoaded || !unitRecordsLoaded) return;
         const key=unitKey(book,unit);
-        if(!isDue(unitStates[key]) || !classCanAccess(unitStates[key],currentUserHR)) return;
         openingStudentUnit=true;
         try {
             selectedBook=book;selectedUnit=unit;
             const records=unitRecords.filter(r=>(r.unitId===key || (Number(r.book)===book && Number(r.unit)===unit)) && isMine(r))
                 .sort((a,b)=>recordTime(b).localeCompare(recordTime(a)));
             const pending=records.find(r=>recordDetails(r).some(d=>!d.isCorrect));
+            if(!records.length && (!isDue(unitStates[key]) || !classCanAccess(unitStates[key],currentUserHR))) return;
             if(records.length && !pending) {viewPreviousResults(records[0]);return;}
             const accepted=await confirmDatabaseWarning(pending
                 ? `${unitLabel(book,unit)}\n\nReady to correct your mistakes?\nPress OK to begin, or Cancel to return to the menu.`
                 : `${unitLabel(book,unit)}\n\nReady to take the test?\nPress OK to begin, or Cancel to return to the menu.`,
                 pending ? '✍️ Correct Mistakes' : '📚 Start Exam');
-            if(!accepted || isAdmin || !isDue(unitStates[key]) || !classCanAccess(unitStates[key],currentUserHR)) return;
+            if(!accepted || isAdmin || (!pending && (!isDue(unitStates[key]) || !classCanAccess(unitStates[key],currentUserHR)))) return;
             selectedBook=book;selectedUnit=unit;
             await startStudentExam(!!pending,pending);
         } finally {openingStudentUnit=false;}
@@ -1316,10 +1397,11 @@
         document.getElementById('student-selected-unit').textContent=classCanAccess(state,currentUserHR) ? unitLabel(selectedBook,selectedUnit) : '';
         button.classList.add('hidden');
         if(!unitStatesLoaded || !unitRecordsLoaded) {msg.textContent='Book catalogue ready. Waiting for cloud status / exam records; reload if synchronization fails.';return;}
-        if(!isDue(state) || !classCanAccess(state,currentUserHR)) {msg.textContent='Please select a unit to take the test.';return;}
         const records=unitRecords.filter(r => (r.unitId===key || (r.book===selectedBook && r.unit===selectedUnit)) && isMine(r)).sort((a,b)=>recordTime(b).localeCompare(recordTime(a)));
         const pending=records.find(r=>recordDetails(r).some(d=>!d.isCorrect));
         const record=pending || records[0];
+        if(!record && (!isDue(state) || !classCanAccess(state,currentUserHR))) {msg.textContent=classCanAccess(state,currentUserHR) && state?.scheduleEnabled ? scheduleLabel(state) : 'Please select a unit to take the test.';return;}
+        document.getElementById('student-selected-unit').textContent=unitLabel(selectedBook,selectedUnit);
         msg.textContent=record ? `Initial Score: ${record.score}/${record.totalPossible} · Exam date: ${record.date}` : '✅ This unit is ready for your exam.';
         button.textContent=pending ? '✍️ Start Correcting Mistakes' : record ? '🔍 View Exam Record' : '🚀 Start Exam';
         button.onclick=()=>record && !pending ? viewPreviousResults(record) : startStudentExam(!!pending,pending);
@@ -2090,9 +2172,17 @@
         loadingExam=true;
         const book=selectedBook, unit=selectedUnit;
         try {
-            const state=await getDoc(doc(db,'examUnits',unitKey(book,unit)));
-            if(!state.exists() || !isDue(state.data()) || !classCanAccess(state.data(),currentUserHR)) throw new Error('This unit is not available for your class.');
+            if(isCorrection) {
+                if(!correctionRecord || !isMine(correctionRecord) || !(correctionRecord.unitId===unitKey(book,unit) || (Number(correctionRecord.book)===Number(book) && Number(correctionRecord.unit)===Number(unit)))) throw new Error('Correction record unavailable.');
+            } else {
+                const state=await getDocFromServer(doc(db,'examUnits',unitKey(book,unit)));
+                if(!state.exists() || !isDue(state.data()) || !classCanAccess(state.data(),currentUserHR)) throw new Error('This unit is not available for your class.');
+            }
             const exam=await loadUnitExam(book,unit);
+            if(!isCorrection) {
+                const latestState=await getDocFromServer(doc(db,'examUnits',unitKey(book,unit)));
+                if(!latestState.exists() || !isDue(latestState.data()) || !classCanAccess(latestState.data(),currentUserHR)) throw new Error('This unit is not available for your class at this time.');
+            }
             activeUnit={book,unit,unitId:unitKey(book,unit)};
             activeRecord=isCorrection ? structuredClone(correctionRecord) : {recordId:doc(collection(db,'records')).id,studentName:currentUser,studentHR:currentUserHR,c_name:studentDirectory.find(s=>s.name===currentUser && s.hr===currentUserHR)?.c_name || '',...activeUnit,date:getFormattedDate(),score:0,totalPossible:0,details:[]};
             if(isCorrection && !activeRecord) throw new Error('Correction record unavailable.');
