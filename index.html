@@ -1380,7 +1380,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 availabilityHistory:[{startsAt:schedule.startsAt,endsAt:schedule.endsAt}]};
             delete state.unitId;
             if(codeEnabled) {
-                const otherWindow=statesForPolicy().some(u=>u.unitId!==key && u.generateMakeupCode && Date.parse(u.endsAt)>Date.now());
+                const otherWindow=statesForPolicy().some(u=>u.generateMakeupCode && Date.parse(u.endsAt)>Date.now());
                 const code=codeDoc.exists() && otherWindow ? codeDoc.data().code : sixDigitCode();
                 transaction.set(control,{code,updatedAt:new Date().toISOString()});
             }
@@ -1390,7 +1390,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         unitStates[key]=saved;drawUnits();
         if(codeEnabled) {
             await showSharedMakeupCode();
-            await confirmDatabaseWarning(document.getElementById('makeup-code-display').textContent+'\n\nThis code works for all eligible make-up units during enabled supervised sessions.','Make-up Code');
+            return {makeupMessage:document.getElementById('makeup-code-display').textContent+'\n\nThis code works for all eligible make-up units during enabled supervised sessions.'};
         }
         return true;
     }
@@ -1441,6 +1441,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         let schedule;
         try {schedule=keepOpen ? readUnitSchedule() : null;} catch(error) {alert(error.message);return;}
         const {book,unit}=pendingUnitClasses;
+        let makeupMessage='';
         savingUnitClasses=true;
         document.getElementById('unit-class-confirm').disabled=true;
         document.getElementById('unit-class-cancel').disabled=true;
@@ -1448,6 +1449,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         try {
             const saved=await persistUnitState(book,unit,{disabled:false},classes,keepOpen,schedule);
             if(saved) {
+                makeupMessage=saved.makeupMessage || '';
                 pendingUnitClasses=null;
                 document.getElementById('modal-unit-classes').classList.add('hidden');
             }
@@ -1457,6 +1459,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             document.getElementById('unit-class-cancel').disabled=false;
             document.getElementById('unit-class-off').disabled=false;
         }
+        // The editor must close and release its buttons before another modal is shown.
+        if(makeupMessage) await confirmDatabaseWarning(makeupMessage,'Make-up Code',true);
     }
     window.closeUnitClasses=closeUnitClasses;
     window.confirmUnitClasses=confirmUnitClasses;
