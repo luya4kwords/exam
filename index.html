@@ -1646,15 +1646,19 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             generate.checked=state.generateMakeupCode===true;generate.disabled=locked;
             generate.onchange=previewMakeupCode;
             document.querySelectorAll('#unit-schedule-fields input,#unit-schedule-fields select').forEach(el=>el.onchange=()=>{if(!locked) void previewMakeupCode();});
-            document.getElementById('unit-class-cancel').textContent='Cancel';
+            const closeButton=document.getElementById('unit-class-cancel');
+            closeButton.textContent=locked ? 'Close' : 'Cancel';
+            closeButton.parentElement.style.justifyContent=locked ? 'center' : '';
+            closeButton.style.flex=locked ? '0 1 180px' : '';
+            document.getElementById('unit-class-confirm').classList.toggle('hidden',!!locked);
             document.getElementById('unit-class-confirm').disabled=locked;
             document.getElementById('unit-schedule-notice').textContent=locked
-                ? 'Schedule locked. Existing participants keep their original exam. Missing students must use a supervised make-up session.'
+                ? 'This unit has exam participants. The schedule can no longer be changed.'
                 : 'This schedule can be replaced only if no student has started or completed the exam. The previous unused schedule will be replaced.';
             await showSharedMakeupCode();
             document.getElementById('unit-class-confirm').textContent='Save';
             document.getElementById('modal-unit-classes').classList.remove('hidden');
-            document.getElementById('unit-class-confirm').focus();
+            (locked ? closeButton : document.getElementById('unit-class-confirm')).focus();
             return;
         }
     }
