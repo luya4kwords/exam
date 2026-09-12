@@ -2356,7 +2356,7 @@
     guardPanel.setAttribute('role','dialog');
     guardPanel.setAttribute('aria-modal','true');
     guardPanel.style.zIndex='10000';
-    guardPanel.innerHTML='<div class="modal-card"><h3>正式考試 / Formal Exam</h3><p id="exam-guard-message" role="alert"></p><button type="button" class="btn btn-emerald-grad">進入全螢幕並繼續 / Continue</button></div>';
+    guardPanel.innerHTML='<div class="modal-card"><h3>Formal Exam</h3><p id="exam-guard-message" role="alert" style="white-space:pre-line"></p><button type="button" class="btn btn-emerald-grad">Enter Fullscreen</button></div>';
     document.body.appendChild(guardPanel);
     const guardButton=guardPanel.querySelector('button');
     function guardMessage(message) {
@@ -2367,33 +2367,33 @@
     async function requestExamFullscreen() {
         if(!fullscreenElement()) {
             const request=document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen;
-            if(!request) throw new Error('此瀏覽器不支援全螢幕，請使用支援 Fullscreen 的瀏覽器進行正式考試。');
+            if(!request) throw new Error('This browser does not support fullscreen mode. Please use a browser that supports fullscreen mode to take this exam.');
             await request.call(document.documentElement);
         }
-        if(!fullscreenElement()) throw new Error('請允許全螢幕後再開始正式考試。');
+        if(!fullscreenElement()) throw new Error('Please enter fullscreen mode before starting the exam.');
     }
     const continueGuard=async () => {
         guardButton.disabled=true;
         try {
             await requestExamFullscreen();
-            if(document.hidden || !document.hasFocus()) throw new Error('請回到考試視窗再繼續。');
+            if(document.hidden || !document.hasFocus()) throw new Error('Please return to the exam window to continue.');
             guardPanel.classList.add('hidden');
             examGuard.episode=false;
             examGuard.active=true;
             savePageSession();
-        } catch(error) {guardMessage(error.message || '無法進入全螢幕，請按下按鈕重試。');}
+        } catch(error) {guardMessage(error.message || 'Unable to enter fullscreen mode. Please click “Enter Fullscreen” to try again.');}
         finally {guardButton.disabled=false;}
     };
     function prepareExamGuard(count=0, locked=false) {
         guardButton.onclick=continueGuard;
-        guardButton.textContent='進入全螢幕並繼續 / Continue';
+        guardButton.textContent='Enter Fullscreen';
         examGuard.active=false;
         examGuard.count=count;
         examGuard.locked=locked;
         examGuard.episode=false;
         if(isCorrectionMode) return;
         if(locked) {retryLockedSubmission();return;}
-        guardMessage('正式考試須使用全螢幕。切換分頁、視窗、失焦或離開全螢幕：第一次警告，再次違規將自動交卷。請按下方按鈕開始／繼續。');
+        guardMessage('You must stay in fullscreen mode and keep the exam window active throughout the exam. Switching tabs or windows, clicking outside the exam window, or exiting fullscreen counts as a violation.\n\nThe first violation will trigger a warning. A second violation will immediately submit your exam automatically.\n\nClick “Enter Fullscreen” to start or continue.');
         // A fresh click is required if asynchronous loading consumed user activation.
         guardButton.click();
     }
@@ -2413,17 +2413,17 @@
         saveCurrentAnswer();
         savePageSession();
         if(examGuard.count===1) {
-            guardMessage('⚠️ 第一次違規警告：'+reason+'。本次不交卷；若再次切換分頁、視窗、失焦或離開全螢幕，系統將立即自動交卷。請按下方按鈕返回考試。');
+            guardMessage('⚠️ First warning: '+reason+'\n\nYour exam has not been submitted. If you leave the exam tab or window, or exit fullscreen again, your exam will be submitted automatically and immediately.\n\nClick “Enter Fullscreen” to continue your exam.');
         } else {
             examGuard.locked=true;
             savePageSession();
             retryLockedSubmission();
         }
     }
-    window.addEventListener('blur',()=>detectExamDeparture('考試視窗失去焦點'));
-    document.addEventListener('visibilitychange',()=>{if(document.hidden) detectExamDeparture('離開考試分頁');});
+    window.addEventListener('blur',()=>detectExamDeparture('The exam window is no longer active.'));
+    document.addEventListener('visibilitychange',()=>{if(document.hidden) detectExamDeparture('You left the exam tab.');});
     for(const event of ['fullscreenchange','webkitfullscreenchange'])
-        document.addEventListener(event,()=>{if(!fullscreenElement()) detectExamDeparture('離開全螢幕');});
+        document.addEventListener(event,()=>{if(!fullscreenElement()) detectExamDeparture('You exited fullscreen mode.');});
     // Native dialogs can generate delayed blur/fullscreen events. Resume only after
     // those events settle, with a fullscreen gate if the dialog exited fullscreen.
     for(const name of ['alert','confirm','prompt']) {
@@ -2439,7 +2439,7 @@
                     examGuard.settling=false;
                     if(examGuard.active && isExamActive && !isCorrectionMode && !examGuard.episode && (!fullscreenElement() || document.hidden || !document.hasFocus())) {
                         examGuard.episode=true;
-                        guardMessage('系統對話框已關閉，請返回全螢幕繼續考試。本次不計違規。');
+                        guardMessage('Please return to fullscreen mode to continue your exam. This does not count as a violation.');
                     }
                 },300);
             }
@@ -2563,8 +2563,8 @@
             document.getElementById('screen-exam').classList.remove('hidden');
             isExamActive=true;
             if(examGuard.locked) {
-                guardMessage('自動交卷尚未儲存成功，答案已鎖定。請檢查網路後按下按鈕重試交卷。');
-                guardButton.textContent='重試交卷 / Retry submission';
+                guardMessage('Your exam could not be saved. Your answers are locked and cannot be changed. Please check your internet connection, then click “Retry Submission” to try again.');
+                guardButton.textContent='Retry Submission';
                 guardButton.onclick=retryLockedSubmission;
             } else if(!isCorrectionMode) prepareExamGuard(examGuard.count);
             return;
