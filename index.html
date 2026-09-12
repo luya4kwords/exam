@@ -1311,13 +1311,25 @@
             for(let unit=1;unit<=30;unit++) {
                 const key=unitKey(book,unit), state=unitStates[key] || {};
                 const permitted=isAdmin || classCanAccess(state,currentUserHR);
-                const displayOpen=isDue(state) && permitted;
+                // Admin colour reflects the On/Off setting; student colour reflects current access.
+                const displayOpen=isAdmin ? state.isOpen===true : isDue(state) && permitted;
                 const records=unitRecords.filter(r => (r.unitId===key || (r.book===book && r.unit===unit)) && isMine(r));
                 const pending=records.some(r => recordDetails(r).some(d => !d.isCorrect));
                 const icon=isAdmin || !unitRecordsLoaded ? '' : pending ? '❌' : records.length ? '👍' : permitted && isDue(state) ? '⛔' : '';
                 const card=document.createElement('div');card.className='unit-card'+(book===selectedBook && unit===selectedUnit ? ' selected':'');
                 card.innerHTML=`<div class="unit-heading"><button class="unit-name ${displayOpen ? 'open':''}">${icon}Unit${String(unit).padStart(2,'0')}</button>${isAdmin ? `<button class="unit-switch" role="switch" aria-label="${unitLabel(book,unit)}" aria-checked="${state.isOpen===true}">${state.isOpen ? 'On' : 'Off'}</button>` : ''}</div><div class="unit-date"></div>`;
-                card.querySelector('.unit-date').textContent=permitted ? scheduleLabel(state,isAdmin) : '';
+                const dates=card.querySelector('.unit-date');
+                if(isAdmin && state.isOpen===true) {
+                    for(const entry of availabilityHistory(state)) {
+                        const pair=document.createElement('div');
+                        pair.textContent=scheduleLabel({...state,availabilityHistory:[entry]});
+                        // Legacy date-only entries have no saved time; interpret their day in UTC+08.
+                        const start=Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(entry.startsAt)
+                            ? `${entry.startsAt}T00:00:00+08:00` : entry.startsAt);
+                        pair.style.color=Number.isFinite(start) && Date.now()>=start ? '#16a34a' : '#94a3b8';
+                        dates.appendChild(pair);
+                    }
+                } else dates.textContent=permitted ? scheduleLabel(state) : '';
                 card.onclick=()=> {
                     selectedBook=book;selectedUnit=unit;
                     // Keep the clicked element alive so the browser can detect a double click.
