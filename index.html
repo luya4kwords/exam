@@ -1311,9 +1311,10 @@
             for(let unit=1;unit<=30;unit++) {
                 const key=unitKey(book,unit), state=unitStates[key] || {};
                 const permitted=isAdmin || classCanAccess(state,currentUserHR);
-                // Admin colour reflects the On/Off setting; student colour reflects current access.
-                const displayOpen=isAdmin ? state.isOpen===true : isDue(state) && permitted;
                 const records=unitRecords.filter(r => (r.unitId===key || (r.book===book && r.unit===unit)) && isMine(r));
+                // Completed attempts remain accessible for correction/review after the unit closes.
+                // Admin colour continues to reflect only the On/Off setting.
+                const displayOpen=isAdmin ? state.isOpen===true : records.length>0 || (isDue(state) && permitted);
                 const pending=records.some(r => recordDetails(r).some(d => !d.isCorrect));
                 const icon=isAdmin || !unitRecordsLoaded ? '' : pending ? '❌' : records.length ? '👍' : permitted && isDue(state) ? '⛔' : '';
                 const card=document.createElement('div');card.className='unit-card'+(book===selectedBook && unit===selectedUnit ? ' selected':'');
