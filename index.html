@@ -2349,7 +2349,7 @@
 
     // Formal-exam focus protection. One departure may produce several browser events.
     const examGuard = {active:false, count:0, episode:false, dialogDepth:0, settling:false, locked:false};
-    let guardTimer;
+    let guardTimer, guardWatchdog;
     const fullscreenElement = () => document.fullscreenElement || document.webkitFullscreenElement;
     const guardPanel = document.createElement('div');
     guardPanel.className='modal-overlay hidden';
@@ -2380,11 +2380,13 @@
             guardPanel.classList.add('hidden');
             examGuard.episode=false;
             examGuard.active=true;
+            startGuardWatchdog();
             savePageSession();
         } catch(error) {guardMessage(error.message || 'Unable to enter fullscreen mode. Please click “Enter Fullscreen” to try again.');}
         finally {guardButton.disabled=false;}
     };
     function prepareExamGuard(count=0, locked=false) {
+        stopExamGuard();
         guardButton.onclick=continueGuard;
         guardButton.textContent='Enter Fullscreen';
         examGuard.active=false;
@@ -2400,7 +2402,21 @@
     function stopExamGuard() {
         examGuard.active=false;
         clearTimeout(guardTimer);
+        clearInterval(guardWatchdog);
+        guardWatchdog=undefined;
+        examGuard.settling=false;
         guardPanel.classList.add('hidden');
+    }
+    function checkExamEnvironment() {
+        if(document.hidden) detectExamDeparture('You left the exam tab.');
+        else if(!document.hasFocus()) detectExamDeparture('The exam window is no longer active.');
+        else if(!fullscreenElement()) detectExamDeparture('You exited fullscreen mode.');
+    }
+    function startGuardWatchdog() {
+        clearInterval(guardWatchdog);
+        // OS window switches need not hide the page or deliver a blur event.
+        // Background timers may be delayed by the browser; events remain primary.
+        guardWatchdog=setInterval(checkExamEnvironment,250);
     }
     function retryLockedSubmission() {
         stopExamGuard();
@@ -2422,6 +2438,8 @@
     }
     window.addEventListener('blur',()=>detectExamDeparture('The exam window is no longer active.'));
     document.addEventListener('visibilitychange',()=>{if(document.hidden) detectExamDeparture('You left the exam tab.');});
+    window.addEventListener('focus',checkExamEnvironment);
+    window.addEventListener('pageshow',checkExamEnvironment);
     for(const event of ['fullscreenchange','webkitfullscreenchange'])
         document.addEventListener(event,()=>{if(!fullscreenElement()) detectExamDeparture('You exited fullscreen mode.');});
     // Native dialogs can generate delayed blur/fullscreen events. Resume only after
