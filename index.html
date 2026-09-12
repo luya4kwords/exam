@@ -2571,7 +2571,7 @@
         saveCurrentAnswer();
         savePageSession();
         if(examGuard.count===1) {
-            guardMessage('⚠️ First warning: '+reason+'\n\nYour exam has not been submitted. If you leave the exam tab or window, or exit fullscreen again, your exam will be submitted automatically and immediately.\n\nClick “Enter Fullscreen” to continue your exam.');
+            guardMessage('⚠️ First Warning: '+reason+'\n\nYour exam has not been submitted. If you switch tabs or windows, or exit fullscreen again, your exam will be automatically submitted immediately.\n\nClick “Enter Fullscreen” to continue your exam.');
         } else {
             examGuard.locked=true;
             savePageSession();
