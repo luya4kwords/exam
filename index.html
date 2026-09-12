@@ -1559,12 +1559,12 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     }
     let availabilitySignature='', scheduleSyncBusy=false;
     setInterval(()=>{
-        if(!currentUser || !unitStatesLoaded || isExamActive || loadingExam || savingResult) return;
+        if(!currentUser || !unitStatesLoaded || isExamActive || loadingExam || openingStudentUnit || savingResult) return;
         const signature=JSON.stringify(Object.entries(unitStates).map(([key,state])=>[key,isDue(state),state.scheduleEnabled && Date.now()>=Date.parse(state.endsAt)]));
         if(signature!==availabilitySignature) {availabilitySignature=signature;drawUnits();if(!isAdmin) checkStudentUnitExam();}
     },1000);
     setInterval(async()=>{
-        if(!currentUser || !unitStatesLoaded || isExamActive || loadingExam || savingResult || savingUnitClasses || pendingUnitClasses || scheduleSyncBusy) return;
+        if(!currentUser || !unitStatesLoaded || isExamActive || loadingExam || openingStudentUnit || savingResult || savingUnitClasses || pendingUnitClasses || scheduleSyncBusy) return;
         scheduleSyncBusy=true;
         try {
             const states=await getDocsFromServer(collection(db,'examUnits'));
@@ -1686,7 +1686,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     }
     let openingStudentUnit=false;
     async function openStudentUnit(book,unit) {
-        if(isAdmin || openingStudentUnit || !unitStatesLoaded || !unitRecordsLoaded) return;
+        if(isAdmin || openingStudentUnit || loadingExam || isExamActive || !unitStatesLoaded || !unitRecordsLoaded) return;
         const key=unitKey(book,unit);
         openingStudentUnit=true;
         try {
@@ -1700,7 +1700,11 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 ? `${unitLabel(book,unit)}\n\nReady to correct your mistakes?\nPress OK to begin, or Cancel to return to the menu.`
                 : `${unitLabel(book,unit)}\n\nReady to take the test?\nPress OK to begin, or Cancel to return to the menu.`,
                 pending ? '✍️ Correct Mistakes' : '📚 Start Exam');
-            if(!accepted || isAdmin || (!pending && !canEnterUnit(book,unit))) return;
+            if(!accepted || isAdmin) return;
+            if(!pending && !canEnterUnit(book,unit)) {
+                alert('The exam entry time has ended or availability has changed. Please ask your teacher about a make-up exam.');
+                return;
+            }
             selectedBook=book;selectedUnit=unit;
             await startStudentExam(!!pending,pending);
         } finally {openingStudentUnit=false;}
@@ -2461,15 +2465,27 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         document.getElementById('result-list').innerHTML = resultListHtml;
     }
 
+    const examLoadingPanel=document.createElement('div');
+    examLoadingPanel.className='modal-overlay hidden';
+    examLoadingPanel.style.zIndex='1100';
+    examLoadingPanel.setAttribute('role','status');
+    examLoadingPanel.setAttribute('aria-live','polite');
+    examLoadingPanel.innerHTML='<div class="modal-card"><h3>Preparing Your Exam</h3><p></p></div>';
+    document.body.appendChild(examLoadingPanel);
+    function examLoadingMessage(message) {examLoadingPanel.querySelector('p').textContent=message;}
     async function startStudentExam(isCorrection=false, correctionRecord=null) {
         if(isAdmin || loadingExam || isExamActive) return;
         loadingExam=true;
+        examLoadingPanel.classList.remove('hidden');
+        examLoadingMessage('Loading questions. Please wait; you do not need to click again.');
+        const slowNotice=setTimeout(()=>examLoadingMessage('This is taking longer than usual. Please check your connection and wait. Do not refresh or click again while your exam is being prepared.'),8000);
         const book=selectedBook, unit=selectedUnit;
         try {
             if(isCorrection) {
                 if(!correctionRecord || !isMine(correctionRecord) || !(correctionRecord.unitId===unitKey(book,unit) || (Number(correctionRecord.book)===Number(book) && Number(correctionRecord.unit)===Number(unit)))) throw new Error('Correction record unavailable.');
             }
             const exam=await loadUnitExam(book,unit);
+            examLoadingMessage('Checking exam access and preparing your attempt. Please wait.');
             const admission=isCorrection ? null : await authorizeExamStart(book,unit);
             if(!isCorrection && !admission) return;
             activeUnit={book,unit,unitId:unitKey(book,unit)};
@@ -2483,8 +2499,16 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             document.getElementById('screen-student-select').classList.add('hidden');
             document.getElementById('screen-exam').classList.remove('hidden');
             renderQuestion();
+            savePageSession();
             prepareExamGuard();
-        } catch(error) {alert(`❌ ${error.message}`);} finally {loadingExam=false;}
+        } catch(error) {
+            console.error('Exam entry failed:',error);
+            alert(`❌ Unable to enter the exam.\n${error.message}\n\nIf this continues, show this message to your teacher.`);
+        } finally {
+            clearTimeout(slowNotice);
+            examLoadingPanel.classList.add('hidden');
+            loadingExam=false;
+        }
     }
 
 
