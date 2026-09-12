@@ -749,7 +749,7 @@
         <div id="unit-class-options" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;max-height:280px;overflow-y:auto;"></div>
         <div class="modal-btn-row">
             <button id="unit-class-cancel" class="btn btn-secondary" onclick="closeUnitClasses()">Cancel</button>
-            <button id="unit-class-confirm" class="btn" onclick="confirmUnitClasses()">Open Unit</button>
+            <button id="unit-class-confirm" class="btn" onclick="confirmUnitClasses()">Save</button>
         </div>
     </div>
 </div>
@@ -1390,7 +1390,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             const existing=await getDocFromServer(doc(db,'makeupAdmin',plan.sessionId));
             if(version!==makeupPreviewVersion || !pendingUnitClasses) return;
             box.textContent=`Make-up Code: ${existing.exists() ? existing.data().code : plan.proposedCode}`;
-            document.getElementById('unit-schedule-notice').textContent='Click Save Availability to apply this schedule and code.';
+            document.getElementById('unit-schedule-notice').textContent='Click Save to apply this schedule and code.';
         } catch(error) {if(version===makeupPreviewVersion) box.textContent='Please check the dates and connection, then try again.';}
     }
     async function saveScheduledUnit(book,unit,classes,schedule) {
@@ -1494,13 +1494,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         try {
             const saved=await persistUnitState(book,unit,{disabled:false},classes,keepOpen,schedule);
             if(saved) {
-                if(saved.makeupMessage) {
-                    document.getElementById('unit-schedule-notice').textContent='Saved. This code is valid during the scheduled session.';
-                    document.getElementById('unit-class-cancel').textContent='Close';
-                } else {
-                    pendingUnitClasses=null;
-                    document.getElementById('modal-unit-classes').classList.add('hidden');
-                }
+                pendingUnitClasses=null;
+                document.getElementById('modal-unit-classes').classList.add('hidden');
             }
         } finally {
             savingUnitClasses=false;
@@ -1657,7 +1652,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 ? 'Schedule locked. Existing participants keep their original exam. Missing students must use a supervised make-up session.'
                 : 'This schedule can be replaced only if no student has started or completed the exam. The previous unused schedule will be replaced.';
             await showSharedMakeupCode();
-            document.getElementById('unit-class-confirm').textContent='Save Availability';
+            document.getElementById('unit-class-confirm').textContent='Save';
             document.getElementById('modal-unit-classes').classList.remove('hidden');
             document.getElementById('unit-class-confirm').focus();
             return;
