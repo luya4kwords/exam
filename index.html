@@ -71,6 +71,7 @@
         .makeup-settings label {font-weight:700;display:flex;gap:8px;align-items:center;}
         #makeup-code-display {font-size:1.2rem;letter-spacing:1px;font-weight:700;color:#4338ca;margin-top:8px;}
         #unit-schedule-notice {font-size:.85rem;color:#64748b;margin:10px 0;}
+        #modal-unit-classes fieldset + #unit-schedule-notice {margin-top:4px;}
         @media(max-width:420px) {.schedule-columns {grid-template-columns:1fr;}}
 
         /* Header Layout */
@@ -725,7 +726,7 @@
 <div id="modal-unit-classes" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="unit-classes-title">
     <div class="modal-card" style="max-height:90vh;overflow-y:auto;">
         <h3 id="unit-classes-title" class="modal-title"></h3>
-        <fieldset style="margin:12px 0;padding:12px;border:1px solid #cbd5e1;border-radius:8px;">
+        <fieldset style="margin:12px 0 4px;padding:12px;border:1px solid #cbd5e1;border-radius:8px;">
             <legend>Availability Schedule</legend>
             <label><input id="unit-schedule-enabled" type="checkbox" checked disabled> Enable schedule</label>
             <p style="font-size:0.85rem;margin:8px 0;">This schedule applies only to formal exams. Students can review past exams and complete corrections at any time.</p>
@@ -741,6 +742,7 @@
         <p id="unit-schedule-notice" role="status"></p>
         <div class="makeup-settings">
             <label><input id="generate-makeup-code" type="checkbox"> Generate Make-up Code</label>
+            <p style="font-size:.85rem;margin-top:8px;">Use this code for all eligible make-up exams during this supervised session.</p>
             <div id="makeup-code-display" role="status"></div>
         </div>
         <button id="unit-class-off" class="hidden" disabled>Off</button>
