@@ -738,12 +738,11 @@
                 <div><select id="unit-end-hour" aria-label="End hour"></select> : <select id="unit-end-minute" aria-label="End minute"></select></div></div>
             </div>
         </fieldset>
+        <p id="unit-schedule-notice" role="status"></p>
         <div class="makeup-settings">
             <label><input id="generate-makeup-code" type="checkbox"> Generate Make-up Code</label>
-            <p style="font-size:.85rem;margin-top:8px;">Use this code for all eligible make-up exams during this supervised session.</p>
             <div id="makeup-code-display" role="status"></div>
         </div>
-        <p id="unit-schedule-notice" role="status"></p>
         <button id="unit-class-off" class="hidden" disabled>Off</button>
         <p style="margin-bottom:12px;">Select classes eligible for this exam.</p>
         <div id="unit-class-options" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;max-height:280px;overflow-y:auto;"></div>
@@ -1390,7 +1389,6 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             const existing=await getDocFromServer(doc(db,'makeupAdmin',plan.sessionId));
             if(version!==makeupPreviewVersion || !pendingUnitClasses) return;
             box.textContent=`Make-up Code: ${existing.exists() ? existing.data().code : plan.proposedCode}`;
-            document.getElementById('unit-schedule-notice').textContent='Click Save to apply this schedule and code.';
         } catch(error) {if(version===makeupPreviewVersion) box.textContent='Please check the dates and connection, then try again.';}
     }
     async function saveScheduledUnit(book,unit,classes,schedule) {
@@ -1657,7 +1655,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 : 'You can change the schedule if no students have started or completed the exam. Saving will replace the previous start and end times.';
             const notice=document.getElementById('unit-schedule-notice');
             if(locked) document.getElementById('unit-class-options').after(notice);
-            else document.getElementById('unit-class-off').before(notice);
+            else document.querySelector('#modal-unit-classes .makeup-settings').before(notice);
             closeButton.parentElement.style.marginTop='';
             await showSharedMakeupCode();
             document.getElementById('unit-class-confirm').textContent='Save';
