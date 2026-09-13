@@ -1654,7 +1654,11 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             document.getElementById('unit-class-confirm').disabled=locked;
             document.getElementById('unit-schedule-notice').textContent=locked
                 ? 'This unit has exam participants. The schedule can no longer be changed.'
-                : 'This schedule can be replaced only if no student has started or completed the exam. The previous unused schedule will be replaced.';
+                : 'You can change the schedule if no students have started or completed the exam. Saving will replace the previous start and end times.';
+            const notice=document.getElementById('unit-schedule-notice');
+            if(locked) document.getElementById('unit-class-options').after(notice);
+            else document.getElementById('unit-class-off').before(notice);
+            closeButton.parentElement.style.marginTop=locked ? '8px' : '';
             await showSharedMakeupCode();
             document.getElementById('unit-class-confirm').textContent='Save';
             document.getElementById('modal-unit-classes').classList.remove('hidden');
