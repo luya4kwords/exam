@@ -1658,7 +1658,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             const notice=document.getElementById('unit-schedule-notice');
             if(locked) document.getElementById('unit-class-options').after(notice);
             else document.getElementById('unit-class-off').before(notice);
-            closeButton.parentElement.style.marginTop=locked ? '8px' : '';
+            closeButton.parentElement.style.marginTop='';
             await showSharedMakeupCode();
             document.getElementById('unit-class-confirm').textContent='Save';
             document.getElementById('modal-unit-classes').classList.remove('hidden');
