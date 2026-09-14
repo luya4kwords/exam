@@ -1852,10 +1852,17 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         const heading = `<div class="report-heading"><h3 style="color:var(--primary-color);margin:16px 0;">📚 ${unitLabel(selectedBook,selectedUnit)} · Unit Records</h3>${reportPrintButton()}</div>`;
         container.innerHTML = heading + '<p style="color: var(--text-muted); font-size: 0.9rem;">⏳ Loading Cloud Records...</p>';
 
-        let records;
-        try { await refreshExamStarts();await finalizeExpiredAttempts();records = await getResultsFromCloud(targetUnit); } catch(error) { container.textContent="❌ Unable to load records."; return; }
+        let records,recordUnitState;
+        try {
+            await refreshExamStarts();
+            await finalizeExpiredAttempts();
+            const [loadedRecords,unitSnapshot]=await Promise.all([getResultsFromCloud(targetUnit),getDocFromServer(doc(db,'examUnits',targetUnit))]);
+            records=loadedRecords;
+            recordUnitState=unitSnapshot.exists() ? unitSnapshot.data() : {};
+        } catch(error) { container.textContent="❌ Unable to load records."; return; }
         if(targetUnit !== unitKey(selectedBook,selectedUnit)) return;
-        const classAttempts=new Map();
+        const eligibleClasses=recordUnitState.examClasses || recordUnitState.allowedClasses || [];
+        const classAttempts=new Map(eligibleClasses.map(hr=>[String(hr).trim(),0]).filter(([hr])=>hr));
         for(const rec of records || []) {
             const hr=getStudentHR(rec.studentName,rec.studentHR) || 'Unknown class';
             classAttempts.set(hr,(classAttempts.get(hr) || 0)+1);
@@ -1863,15 +1870,18 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         const footer=document.createElement('div');
         footer.className='unit-records-total';
         footer.style.cssText='margin-top:20px;padding-top:12px;border-top:1px solid #cbd5e1;font-weight:700;text-align:left;';
+        const summaryTitle=document.createElement('p');
+        summaryTitle.textContent='Exam Records by Class';
+        footer.appendChild(summaryTitle);
         for(const [hr,attempts] of [...classAttempts].sort(([a],[b])=>a.localeCompare(b,undefined,{numeric:true}))) {
             const line=document.createElement('p');
             line.style.margin='4px 0';
-            line.textContent=`${hr}：學生應考次數 ${attempts} 次`;
+            line.textContent=`${hr}: ${attempts} ${attempts===1 ? 'record' : 'records'}`;
             footer.appendChild(line);
         }
         const totalLine=document.createElement('p');
         totalLine.style.marginTop='8px';
-        totalLine.textContent=`總數：${records?.length || 0} 次`;
+        totalLine.textContent=`Total Exam Records: ${records?.length || 0}`;
         footer.appendChild(totalLine);
         const totalFooter=footer.outerHTML;
         container.innerHTML = heading + printRecordSummary(records);
