@@ -1914,6 +1914,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             const recEl = document.createElement('div');
             recEl.className = 'student-record-item';
 
+            const isPerfectScore = Number(rec.totalPossible) > 0 && Number(rec.score) === Number(rec.totalPossible);
             const isFullyCorrected = recordDetails(rec).length > 0 && !recordDetails(rec).some(d => !d.isCorrect);
 
             let detailsHtml = recordDetails(rec).map(d => `
@@ -1932,7 +1933,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 <p>Submission reason: ${submissionReasonLabel(rec.submissionReason)}</p>
                 <div class="record-summary">
                     <span style="font-size:1rem; font-weight:700;">👤 <span style="color:#16a34a;">${getStudentHR(rec.studentName, rec.studentHR)}</span> <span style="color:#0f172a;">${studentDisplayHTML(rec.studentName,rec.studentHR,rec.c_name)}</span></span>
-                    <span>${recordLabel(rec)} · Exam date: ${rec.date}<br>Initial Score: <strong style="color: var(--primary-color); font-size: 1.1rem;">${rec.score} / ${rec.totalPossible}</strong> ${isFullyCorrected ? '<span style="color:var(--success-color); font-size:0.85rem; font-weight:700;">(Correction Complete)</span>' : '<span style="color:var(--danger-color); font-size:0.85rem; font-weight:700;">(Needs Correction)</span>'}</span>
+                    <span>${recordLabel(rec)} · Exam date: ${rec.date}<br>Initial Score: <strong style="color: var(--primary-color); font-size: 1.1rem;">${rec.score} / ${rec.totalPossible}</strong> ${isPerfectScore ? '<span style="color:var(--success-color); font-size:0.85rem; font-weight:700;">(Perfect Score)</span>' : isFullyCorrected ? '<span style="color:var(--success-color); font-size:0.85rem; font-weight:700;">(Correction Complete)</span>' : '<span style="color:var(--danger-color); font-size:0.85rem; font-weight:700;">(Needs Correction)</span>'}</span>
                     <button class="btn btn-inline btn-secondary" onclick="toggleDetails('rec-detail-${idx}')">Details</button>
                 </div>
                 <div id="rec-detail-${idx}" class="hidden" style="margin-top: 10px;">
@@ -2334,6 +2335,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             `;
 
             let recordsHtml = matchedRecords.map((rec, idx) => {
+                const isPerfectScore = Number(rec.totalPossible) > 0 && Number(rec.score) === Number(rec.totalPossible);
                 const isFullyCorrected = rec.details && !rec.details.some(d => !d.isCorrect);
 
                 let detailsHtml = (rec.details || []).map(d => `
@@ -2354,7 +2356,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                         <div class="record-summary">
                             <span style="font-size: 1.1rem; font-weight: 700; color: var(--text-main);">📅 Date: ${rec.date}</span>
                             <span>${recordLabel(rec)} · Exam date: ${rec.date}<br>Initial Score: <strong style="color: var(--primary-color); font-size: 1.1rem;">${rec.score} / ${rec.totalPossible}</strong> 
-                                ${isFullyCorrected ? '<span style="color:var(--success-color); font-size:0.85rem; font-weight:700; margin-left:6px;">(Correction Complete)</span>' : '<span style="color:var(--danger-color); font-size:0.85rem; font-weight:700; margin-left:6px;">(Needs Correction)</span>'}
+                                ${isPerfectScore ? '<span style="color:var(--success-color); font-size:0.85rem; font-weight:700;">(Perfect Score)</span>' : isFullyCorrected ? '<span style="color:var(--success-color); font-size:0.85rem; font-weight:700; margin-left:6px;">(Correction Complete)</span>' : '<span style="color:var(--danger-color); font-size:0.85rem; font-weight:700; margin-left:6px;">(Needs Correction)</span>'}
                             </span>
                             <button class="btn btn-inline btn-secondary" onclick="toggleDetails('history-rec-detail-${idx}')">Details</button>
                         </div>
