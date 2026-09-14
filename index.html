@@ -2958,6 +2958,18 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     window.addEventListener('focus',tickExamCountdown);
     document.addEventListener('visibilitychange',tickExamCountdown);
 
+    // Disable the page context menu only while a student is taking a formal exam.
+    // A blocked right click does not count as an exam-rule violation.
+    function blockExamContextMenu(event) {
+        if(!isExamActive || isCorrectionMode || isAdmin) return;
+        event.preventDefault();
+        event.stopPropagation();
+    }
+    document.addEventListener('contextmenu',blockExamContextMenu,true);
+    document.addEventListener('keydown',event=>{
+        if(event.key==='ContextMenu' || (event.shiftKey && event.key==='F10'))blockExamContextMenu(event);
+    },true);
+
     // Formal-exam focus protection. One departure may produce several browser events.
     const examGuard = {active:false, count:0, episode:false, dialogDepth:0, settling:false, locked:false};
     let guardTimer, guardWatchdog;
