@@ -1855,7 +1855,25 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         let records;
         try { await refreshExamStarts();await finalizeExpiredAttempts();records = await getResultsFromCloud(targetUnit); } catch(error) { container.textContent="❌ Unable to load records."; return; }
         if(targetUnit !== unitKey(selectedBook,selectedUnit)) return;
-        const totalFooter=`<p class="unit-records-total" style="margin-top:20px;padding-top:12px;border-top:1px solid #cbd5e1;font-weight:700;text-align:right;">Total Records: ${records?.length || 0}</p>`;
+        const classStudents=new Map();
+        for(const rec of records || []) {
+            const hr=getStudentHR(rec.studentName,rec.studentHR) || 'Unknown class';
+            if(!classStudents.has(hr))classStudents.set(hr,new Set());
+            classStudents.get(hr).add(normalizeLoginValue(rec.studentName) || rec.recordId);
+        }
+        const footer=document.createElement('div');
+        footer.className='unit-records-total';
+        footer.style.cssText='margin-top:20px;padding-top:12px;border-top:1px solid #cbd5e1;font-weight:700;text-align:left;';
+        const totalLine=document.createElement('p');
+        totalLine.textContent=`Total Records: ${records?.length || 0}`;
+        footer.appendChild(totalLine);
+        for(const [hr,students] of [...classStudents].sort(([a],[b])=>a.localeCompare(b,undefined,{numeric:true}))) {
+            const line=document.createElement('p');
+            line.style.margin='4px 0';
+            line.textContent=`${hr}: ${students.size} ${students.size===1 ? 'student' : 'students'}`;
+            footer.appendChild(line);
+        }
+        const totalFooter=footer.outerHTML;
         container.innerHTML = heading + printRecordSummary(records);
 
         if (!records || records.length === 0) {
