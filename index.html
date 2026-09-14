@@ -1855,10 +1855,11 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         let records;
         try { await refreshExamStarts();await finalizeExpiredAttempts();records = await getResultsFromCloud(targetUnit); } catch(error) { container.textContent="❌ Unable to load records."; return; }
         if(targetUnit !== unitKey(selectedBook,selectedUnit)) return;
+        const totalFooter=`<p class="unit-records-total" style="margin-top:20px;padding-top:12px;border-top:1px solid #cbd5e1;font-weight:700;text-align:right;">Total Records: ${records?.length || 0}</p>`;
         container.innerHTML = heading + printRecordSummary(records);
 
         if (!records || records.length === 0) {
-            container.innerHTML = heading + `<p style="color: var(--text-muted); font-size: 0.9rem;">No students have completed the exam for ${unitLabel(selectedBook,selectedUnit)}.</p>`;
+            container.innerHTML = heading + `<p style="color: var(--text-muted); font-size: 0.9rem;">No students have completed the exam for ${unitLabel(selectedBook,selectedUnit)}.</p>` + totalFooter;
             return;
         }
 
@@ -1882,7 +1883,6 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
 
             recEl.innerHTML = `
                 <p>Submission reason: ${submissionReasonLabel(rec.submissionReason)}</p>
-                <p>Submission reason: ${submissionReasonLabel(rec.submissionReason)}</p>
                 <div class="record-summary">
                     <span style="font-size:1rem; font-weight:700;">👤 <span style="color:#16a34a;">${getStudentHR(rec.studentName, rec.studentHR)}</span> <span style="color:#0f172a;">${studentDisplayHTML(rec.studentName,rec.studentHR,rec.c_name)}</span></span>
                     <span>${recordLabel(rec)} · Exam date: ${rec.date}<br>Initial Score: <strong style="color: var(--primary-color); font-size: 1.1rem;">${rec.score} / ${rec.totalPossible}</strong> ${isFullyCorrected ? '<span style="color:var(--success-color); font-size:0.85rem; font-weight:700;">(Correction Complete)</span>' : '<span style="color:var(--danger-color); font-size:0.85rem; font-weight:700;">(Needs Correction)</span>'}</span>
@@ -1894,6 +1894,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             `;
             container.appendChild(recEl);
         });
+        container.insertAdjacentHTML('beforeend',totalFooter);
     }
 
     async function calculateUncorrectedStudents() {
