@@ -625,6 +625,7 @@
         
         <p id="backup-status" class="status-msg" aria-live="polite"></p>
         <p id="admin-sync-status" class="status-msg" aria-live="polite"></p>
+        <button class="btn btn-inline btn-secondary" onclick="refreshUnitMenu(true)">Refresh</button>
         <div id="admin-units"></div>
 
         <!-- Admin View Records -->
@@ -650,6 +651,7 @@
     <div id="screen-student-select" class="hidden">
         <h2 style="margin-bottom:14px;">📚 Book & Unit Selection</h2>
         <p id="student-sync-status" class="status-msg" aria-live="polite"></p>
+        <button class="btn btn-inline btn-secondary" onclick="refreshUnitMenu(true)">Refresh</button>
         <div id="student-units"></div>
         <div class="card-box">
             <h3 id="student-selected-unit">Book1 / Unit01</h3>
@@ -814,7 +816,7 @@
 <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
     import { getAuth, signInAnonymously, GoogleAuthProvider, signInWithPopup, signOut, setPersistence, browserSessionPersistence } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
-    import { getFirestore, runTransaction, doc, setDoc, getDoc, getDocFromServer, collection, getDocs, getDocsFromServer, writeBatch } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+    import { getFirestore, runTransaction as firestoreTransaction, doc, setDoc as firestoreSetDoc, getDoc, getDocFromServer, collection, query, where, getDocs, getDocsFromServer, writeBatch as firestoreBatch } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
 
     const firebaseConfig = {
         apiKey: "AIzaSyAbpAnc5Ub9mGGm5kUgP3jCKXwAnZONwrE",
@@ -829,6 +831,43 @@
     const app = initializeApp(firebaseConfig);
     const db = getFirestore(app);
     const auth = getAuth(app);
+    // Cache completed reads for one minute, and share concurrent requests.
+    const readCache=new Map();
+    const READ_CACHE_MS=60000;
+    function invalidateReads() {readCache.clear();}
+    async function cachedRead(key,fetcher,force=false) {
+        const old=readCache.get(key);
+        if(old && (old.pending || (!force && Date.now()-old.time<READ_CACHE_MS)))return old.promise;
+        const entry={pending:true,time:0};
+        entry.promise=Promise.resolve().then(fetcher).then(value=>{entry.pending=false;entry.time=Date.now();return value;},error=>{if(readCache.get(key)===entry)readCache.delete(key);throw error;});
+        readCache.set(key,entry);return entry.promise;
+    }
+    async function runTransaction(...args) {const result=await firestoreTransaction(...args);invalidateReads();return result;}
+    async function setDoc(...args) {const result=await firestoreSetDoc(...args);invalidateReads();return result;}
+    function writeBatch(...args) {
+        const batch=firestoreBatch(...args),commit=batch.commit.bind(batch);
+        batch.commit=async()=>{const result=await commit();invalidateReads();return result;};return batch;
+    }
+    function cachedCollection(name,force=false) {
+        return cachedRead('all:'+name,()=>getDocsFromServer(collection(db,name)),force);
+    }
+    function studentDocuments(name,studentName=currentUser,hr=currentUserHR,force=false) {
+        // The roster supplies the canonical name used when records are created.
+        return cachedRead(JSON.stringify(['student',name,studentName,hr]),()=>getDocsFromServer(query(collection(db,name),where('studentName','==',studentName),where('studentHR','==',hr))),force);
+    }
+    function unitDocuments(name,unitId,force=false) {
+        const match=/^B([1-6])U(\d{2})$/.exec(unitId);
+        if(!match)throw new Error('Invalid Unit');
+        return cachedRead(JSON.stringify(['unit',name,unitId]),async()=>{
+            // Read only this Unit. The second query includes old book/unit-only records.
+            const snapshots=await Promise.all([
+                getDocsFromServer(query(collection(db,name),where('unitId','==',unitId))),
+                getDocsFromServer(query(collection(db,name),where('book','==',Number(match[1])),where('unit','==',Number(match[2]))))
+            ]);
+            const docs=[...new Map(snapshots.flatMap(snap=>snap.docs).map(d=>[d.id,d])).values()];
+            return {docs,forEach:fn=>docs.forEach(fn)};
+        },force);
+    }
     const ADMIN_EMAILS = ['huang@luya.academy', 'owenchin@luya.academy', 'jacklee@luya.academy', 'keyeslee@luya.academy'];
     const isAllowedAdmin = user => user?.emailVerified === true && ADMIN_EMAILS.includes(user.email?.toLowerCase());
     const authReady = setPersistence(auth, browserSessionPersistence);
@@ -887,11 +926,10 @@
         await setDoc(doc(db, "records", recordData.recordId), recordData);
         return recordData;
     }
-    async function getResultsFromCloud(unitId) {
-        const snapshot = await getDocs(collection(db, "records"));
-        return snapshot.docs.map(d => ({...d.data(), recordId:d.id}))
-            .filter(r => r.unitId === unitId || (r.book && r.unit && unitKey(r.book,r.unit) === unitId))
-            .sort((a,b) => (b.submittedAt || b.date || '').localeCompare(a.submittedAt || a.date || ''));
+    async function getResultsFromCloud(unitId,force=false) {
+        const snapshot=await unitDocuments('records',unitId,force);
+        return snapshot.docs.map(d=>({...d.data(),recordId:d.id}))
+            .sort((a,b)=>(b.submittedAt || b.date || '').localeCompare(a.submittedAt || a.date || ''));
     }
 
 
@@ -1139,6 +1177,7 @@
             isAdmin = false;
             currentUser = matchedStudent.name;
             currentUserHR = matchedStudent.hr;
+            unitRecords=[];examStarts=[];unitRecordsLoaded=false;startsLoaded=false;
 
             document.getElementById('user-role-icon').innerText = "👤";
             document.getElementById('user-role-label').innerText = `Student (${currentUserHR})`;
@@ -1309,14 +1348,14 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         return record;
     }
     let finalizingExpired=false;
-    async function finalizeExpiredAttempts() {
+    async function finalizeExpiredAttempts(unitId=null) {
         // Existing rules allow only Administrator to close another student's attempt.
         if(!isAdmin || finalizingExpired) return;
         finalizingExpired=true;
         const exams=new Map();
         let failures=0;
         try {
-            for(const attempt of examStarts.filter(a=>a.status==='in_progress' && Date.now()>=attemptDeadline(a))) {
+            for(const attempt of examStarts.filter(a=>(!unitId || unitKey(a.book,a.unit)===unitId) && a.status==='in_progress' && Date.now()>=attemptDeadline(a))) {
                 const id=attempt.recordId || attempt.id;
                 try {
                     // Check for a submitted result before loading a possibly changed question file.
@@ -1355,12 +1394,18 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     function expiredOwnAttempt(book,unit) {
         return examStarts.find(a=>Number(a.book)===Number(book) && Number(a.unit)===Number(unit) && sameStudent(a,currentStudent()) && Date.now()>=attemptDeadline(a));
     }
-    async function refreshExamStarts() {
-        const snap=await getDocsFromServer(collection(db,'examStarts'));
-        examStarts=snap.docs.map(d=>({...d.data(),id:d.id}));startsLoaded=true;
+    async function refreshExamStarts(force=false,unitId=null) {
+        const owner=String(isAdmin)+':'+currentUserHR+':'+currentUser;
+        const snap=isAdmin ? (unitId ? await unitDocuments('examStarts',unitId,force) : await cachedCollection('examStarts',force)) : await studentDocuments('examStarts',currentUser,currentUserHR,force);
+        if(owner!==String(isAdmin)+':'+currentUserHR+':'+currentUser)return;
+        const rows=snap.docs.map(d=>({...d.data(),id:d.id}));
+        examStarts=unitId ? [...examStarts.filter(a=>unitKey(a.book,a.unit)!==unitId),...rows] : rows;
+        startsLoaded=true;
     }
-    async function refreshPolicyData() {
-        const [states,records]=await Promise.all([getDocsFromServer(collection(db,'examUnits')),getDocsFromServer(collection(db,'records')),refreshExamStarts()]);
+    async function refreshPolicyData(force=false) {
+        const owner=String(isAdmin)+':'+currentUserHR+':'+currentUser;
+        const [states,records]=await Promise.all([cachedCollection('examUnits',force),isAdmin ? cachedCollection('records',force) : studentDocuments('records',currentUser,currentUserHR,force),refreshExamStarts(force)]);
+        if(owner!==String(isAdmin)+':'+currentUserHR+':'+currentUser)return;
         unitStates=Object.fromEntries(states.docs.map(d=>[d.id,d.data()]));
         unitRecords=records.docs.map(d=>({...d.data(),recordId:d.id}));
         unitStatesLoaded=unitRecordsLoaded=true;
@@ -1410,7 +1455,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     }
     async function authorizeExamStart(book,unit,exam) {
         await ensureStudentSession();
-        await refreshPolicyData();
+        await refreshPolicyData(true);
         const state=policyState(book,unit), student=currentStudent();
         if(unitRecords.some(r=>sameExam(r,state) && sameStudent(r,student))) throw new Error('You have already completed this exam. Please use corrections or view your result.');
         if(expiredOwnAttempt(book,unit)) throw new Error('The 30-minute limit has passed. This attempt is scored 0 and cannot be restarted. Administrator will record the result when opening the system.');
@@ -1434,7 +1479,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             const [existing,latest]=await Promise.all([transaction.get(ref),transaction.get(unitRef)]);
             if(existing.exists()) throw new Error('This exam has already been started. Resume it in the original browser, or ask your teacher for help.');
             const fresh={...latest.data(),unitId:unitKey(book,unit)};
-            if(!host && examPhase(fresh)!=='active') throw new Error('The exam entry time has ended.');
+            if(!host && (examPhase(fresh)!=='active' || !eligibleStudent(fresh,student))) throw new Error('The exam entry time has ended.');
             const now=new Date().toISOString();
             const attempt={book,unit,unitId:unitKey(book,unit),studentName:currentUser,studentHR:currentUserHR,
                 uid:auth.currentUser.uid,startedAt:now,status:'in_progress',isMakeup:!!host,
@@ -1492,7 +1537,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     }
     async function saveScheduledUnit(book,unit,classes,schedule) {
         const key=unitKey(book,unit);
-        await refreshPolicyData();
+        await refreshPolicyData(true);
         const before=policyState(book,unit);
         if(!mayReplaceSchedule(before,unitRecords,examStarts) || before.hasParticipation)
             throw new Error('This schedule is locked because a student has started or completed the exam. Use make-up exams instead.');
@@ -1620,62 +1665,34 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             throw new Error(`${filename}: no valid exam; check question, answer and points`);
         return parsed;
     }
-    async function renderUnits() {
-        // The catalogue is fixed local UI, never dependent on cloud availability.
+    async function renderUnits(force=false) {
         drawUnits();
-        if (!isAdmin) checkStudentUnitExam();
-        const notice = document.getElementById(isAdmin ? 'admin-sync-status' : 'student-sync-status');
-        notice.textContent = '⏳ Syncing unit status...';
-        const errors = [];
-        const refresh = () => {
-            drawUnits();
-            if (!isAdmin) checkStudentUnitExam();
-        };
-        const stateTask = getDocs(collection(db,'examUnits')).then(states => {
-            unitStates = Object.fromEntries(states.docs.map(d => [d.id,d.data()]));
-            unitStatesLoaded = true;
-            refresh();
-        }).catch(error => {
-            console.error('Unit status sync:', error);
-            errors.push(`Unit status could not sync (${error.code || error.message}). The book catalogue remains available; displayed Off values are unconfirmed.`);
-            notice.textContent = errors.join(' ');
-        });
-        // Administrator only needs records when an analytics button is selected.
-        const recordTask = isAdmin ? Promise.resolve() : getDocs(collection(db,'records')).then(records => {
-            unitRecords = records.docs.map(d => ({...d.data(),recordId:d.id}));
-            unitRecordsLoaded = true;
-            refresh();
-        }).catch(error => {
-            console.error('Student record sync:', error);
-            errors.push(`Exam records could not sync (${error.code || error.message}). Please reload before starting an exam.`);
-            notice.textContent = errors.join(' ');
-        });
-        await Promise.allSettled([stateTask, recordTask,refreshExamStarts().then(refresh).catch(error=>{
-            startsLoaded=false;errors.push('Exam participation could not sync. Check the updated Firestore rules.');
-        })]);
-        if(isAdmin) {try {await refreshPolicyData();refresh();} catch(error) {errors.push('Schedule migration could not sync. Please retry before starting exams.');}}
-        notice.textContent = errors.join(' ');
+        const notice=document.getElementById(isAdmin ? 'admin-sync-status' : 'student-sync-status');
+        notice.textContent='Syncing unit status…';
+        try {
+            await refreshPolicyData(force);
+            drawUnits();if(!isAdmin)checkStudentUnitExam();
+            notice.textContent='Updated '+new Date().toLocaleTimeString()+'. Use Refresh for the latest status.';
+        } catch(error) {
+            notice.textContent='Unable to refresh: '+error.message+'. Please try Refresh again later.';
+        }
     }
+    let refreshingView=false;
+    async function refreshUnitMenu(force=true) {
+        if(refreshingView || document.hidden || isExamActive || loadingExam || savingResult || savingUnitClasses || pendingUnitClasses)return;
+        refreshingView=true;
+        try {await renderUnits(force);}finally {refreshingView=false;}
+    }
+    window.refreshUnitMenu=refreshUnitMenu;
+    document.addEventListener('visibilitychange',()=>{
+        if(!document.hidden && currentUser && !isExamActive)void refreshUnitMenu(false);
+    });
     let availabilitySignature='', scheduleSyncBusy=false;
     setInterval(()=>{
-        if(!currentUser || !unitStatesLoaded || isExamActive || loadingExam || openingStudentUnit || savingResult) return;
+        if(document.hidden || !currentUser || !unitStatesLoaded || isExamActive || loadingExam || openingStudentUnit || savingResult) return;
         const signature=JSON.stringify(Object.entries(unitStates).map(([key,state])=>[key,isDue(state),state.scheduleEnabled && Date.now()>=Date.parse(state.endsAt)]));
         if(signature!==availabilitySignature) {availabilitySignature=signature;drawUnits();if(!isAdmin) checkStudentUnitExam();}
     },1000);
-    setInterval(async()=>{
-        if(!currentUser || !unitStatesLoaded || isExamActive || loadingExam || openingStudentUnit || savingResult || savingUnitClasses || pendingUnitClasses || scheduleSyncBusy) return;
-        scheduleSyncBusy=true;
-        try {
-            const states=await getDocsFromServer(collection(db,'examUnits'));
-            await refreshExamStarts();
-            await finalizeExpiredAttempts();
-            // Do not overwrite newer local edits if an administrator opened the editor meanwhile.
-            if(savingUnitClasses || pendingUnitClasses || isExamActive) return;
-            const fresh=Object.fromEntries(states.docs.map(d=>[d.id,d.data()]));
-            if(JSON.stringify(fresh)!==JSON.stringify(unitStates)) {unitStates=fresh;drawUnits();if(!isAdmin) checkStudentUnitExam();}
-        } catch(error) {console.warn('Availability refresh failed:',error);}
-        finally {scheduleSyncBusy=false;}
-    },30000);
     function drawUnits() {
         const host = document.getElementById(isAdmin ? 'admin-units' : 'student-units');
         host.replaceChildren();
@@ -1841,7 +1858,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     }
 
 
-    async function loadAdminStudentRecords() {
+    async function loadAdminStudentRecords(force=false) {
         if (!isAdmin) return;
         if (selectedBook === null || selectedUnit === null) {
             document.getElementById('records-list').textContent='Please select a unit to view its records.';
@@ -1849,14 +1866,14 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         }
         const targetUnit = unitKey(selectedBook,selectedUnit);
         const container = document.getElementById('records-list');
-        const heading = `<div class="report-heading"><h3 style="color:var(--primary-color);margin:16px 0;">📚 ${unitLabel(selectedBook,selectedUnit)} · Unit Records</h3>${reportPrintButton()}</div>`;
+        const heading = `<div class="report-heading"><h3 style="color:var(--primary-color);margin:16px 0;">📚 ${unitLabel(selectedBook,selectedUnit)} · Unit Records</h3>${reportPrintButton()}<button class="btn btn-inline btn-secondary" onclick="loadAdminStudentRecords(true)">Refresh</button></div>`;
         container.innerHTML = heading + '<p style="color: var(--text-muted); font-size: 0.9rem;">⏳ Loading Cloud Records...</p>';
 
         let records,recordUnitState;
         try {
-            await refreshExamStarts();
-            await finalizeExpiredAttempts();
-            const [loadedRecords,unitSnapshot]=await Promise.all([getResultsFromCloud(targetUnit),getDocFromServer(doc(db,'examUnits',targetUnit))]);
+            await refreshExamStarts(force,targetUnit);
+            await finalizeExpiredAttempts(targetUnit);
+            const [loadedRecords,unitSnapshot]=await Promise.all([getResultsFromCloud(targetUnit,force),cachedRead('unit-state:'+targetUnit,()=>getDocFromServer(doc(db,'examUnits',targetUnit)),force)]);
             records=loadedRecords;
             recordUnitState=unitSnapshot.exists() ? unitSnapshot.data() : {};
         } catch(error) { container.textContent="❌ Unable to load records."; return; }
@@ -1926,11 +1943,12 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     }
 
     async function calculateUncorrectedStudents() {
+        if(!isAdmin)return;
         const container = document.getElementById('records-list');
         container.innerHTML = '<p style="color: var(--text-muted); font-size: 0.9rem;">⏳ Scanning all student correction records...</p>';
 
         try {
-            const querySnapshot = await getDocs(collection(db, "records"));
+            const querySnapshot = await cachedCollection('records');
             let studentUncorrectedMap = {};
 
             querySnapshot.forEach((doc) => {
@@ -2055,6 +2073,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     }
 
     async function calculateAbsentStudents() {
+        if(!isAdmin)return;
         const container = document.getElementById('records-list');
         container.innerHTML = '<p style="color: var(--text-muted); font-size: 0.9rem;">⏳ Scanning all absentee records...</p>';
 
@@ -2250,11 +2269,12 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     }
 
     async function fetchAndRenderStudentHistory(searchName, startStr, endStr, selectedClass) {
+        if(!isAdmin)return;
         const container = document.getElementById('records-list');
         container.innerHTML = `<p style="color: var(--text-muted); font-size: 0.9rem;">⏳ Searching score history for "${selectedClass} ${studentDisplayHTML(searchName,selectedClass)}" (${startStr} ~ ${endStr})...</p>`;
 
         try {
-            const querySnapshot = await getDocs(collection(db, "records"));
+            const querySnapshot = await cachedCollection('records');
             const normalizedSearch = normalizeLoginValue(searchName);
 
             let matchedRecords = [];
@@ -2463,12 +2483,13 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     }
 
     async function calculateRangeLeaderboard(startStr, endStr, titleText, selectedClasses) {
+        if(!isAdmin)return;
         const container = document.getElementById('records-list');
         container.innerHTML = `<p style="color: var(--text-muted); font-size: 0.9rem;">⏳ Calculating ranking data from ${startStr} to ${endStr}...</p>`;
 
         try {
             const [querySnapshot, unitSnapshot] = await Promise.all([
-                getDocs(collection(db, 'records')), getDocs(collection(db, 'examUnits'))
+                cachedCollection('records'), cachedCollection('examUnits')
             ]);
             let studentScores = {};
             const rankingUnits = new Set();
