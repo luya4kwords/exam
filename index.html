@@ -258,6 +258,9 @@
         #records-list { overflow-x:auto; }
         .report-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
         .report-heading h3 { margin:0 !important; flex:1; }
+        .unit-records-heading { padding-right:15px; }
+        .unit-records-heading .unit-records-refresh { flex:none; }
+        #admin-sync-status:empty { display:none; }
         .print-report-button { flex:none; border:1px solid var(--border-color); background:#fff; border-radius:8px; padding:8px 12px; font-size:1.2rem; cursor:pointer; }
         #report-print-area { display:none; }
         .print-record-summary { display:none; }
@@ -624,8 +627,6 @@
         </div>
         
         <p id="backup-status" class="status-msg" aria-live="polite"></p>
-        <p id="admin-sync-status" class="status-msg" aria-live="polite"></p>
-        <button class="btn btn-inline btn-secondary" onclick="refreshUnitMenu(true)">Refresh</button>
         <div id="admin-units"></div>
 
         <!-- Admin View Records -->
@@ -643,6 +644,7 @@
                 <button class="btn btn-emerald-grad admin-action-btn" onclick="openScoreHistoryModal()">🔍👤 View Score History</button>
             </div>
 
+            <p id="admin-sync-status" class="status-msg" aria-live="polite"></p>
             <div id="records-list"></div>
         </div>
     </div>
@@ -1668,11 +1670,11 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     async function renderUnits(force=false) {
         drawUnits();
         const notice=document.getElementById(isAdmin ? 'admin-sync-status' : 'student-sync-status');
-        notice.textContent='Syncing unit status…';
+        notice.textContent=isAdmin ? '' : 'Syncing unit status…';
         try {
             await refreshPolicyData(force);
             drawUnits();if(!isAdmin)checkStudentUnitExam();
-            notice.textContent='Updated '+new Date().toLocaleTimeString()+'. Use Refresh for the latest status.';
+            notice.textContent=isAdmin ? '' : 'Updated '+new Date().toLocaleTimeString()+'. Use Refresh for the latest status.';
         } catch(error) {
             notice.textContent='Unable to refresh: '+error.message+'. Please try Refresh again later.';
         }
@@ -1866,7 +1868,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         }
         const targetUnit = unitKey(selectedBook,selectedUnit);
         const container = document.getElementById('records-list');
-        const heading = `<div class="report-heading"><h3 style="color:var(--primary-color);margin:16px 0;">📚 ${unitLabel(selectedBook,selectedUnit)} · Unit Records</h3>${reportPrintButton()}<button class="btn btn-inline btn-secondary" onclick="loadAdminStudentRecords(true)">Refresh</button></div>`;
+        const heading = `<div class="report-heading unit-records-heading"><h3 style="color:var(--primary-color);margin:16px 0;">📚 ${unitLabel(selectedBook,selectedUnit)} · Unit Records</h3>${reportPrintButton()}<button class="btn btn-inline btn-blue-grad unit-records-refresh" onclick="loadAdminStudentRecords(true)">Refresh</button></div>`;
         container.innerHTML = heading + '<p style="color: var(--text-muted); font-size: 0.9rem;">⏳ Loading Cloud Records...</p>';
 
         let records,recordUnitState;
