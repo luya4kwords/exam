@@ -1855,24 +1855,24 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         let records;
         try { await refreshExamStarts();await finalizeExpiredAttempts();records = await getResultsFromCloud(targetUnit); } catch(error) { container.textContent="❌ Unable to load records."; return; }
         if(targetUnit !== unitKey(selectedBook,selectedUnit)) return;
-        const classStudents=new Map();
+        const classAttempts=new Map();
         for(const rec of records || []) {
             const hr=getStudentHR(rec.studentName,rec.studentHR) || 'Unknown class';
-            if(!classStudents.has(hr))classStudents.set(hr,new Set());
-            classStudents.get(hr).add(normalizeLoginValue(rec.studentName) || rec.recordId);
+            classAttempts.set(hr,(classAttempts.get(hr) || 0)+1);
         }
         const footer=document.createElement('div');
         footer.className='unit-records-total';
         footer.style.cssText='margin-top:20px;padding-top:12px;border-top:1px solid #cbd5e1;font-weight:700;text-align:left;';
-        const totalLine=document.createElement('p');
-        totalLine.textContent=`Total Records: ${records?.length || 0}`;
-        footer.appendChild(totalLine);
-        for(const [hr,students] of [...classStudents].sort(([a],[b])=>a.localeCompare(b,undefined,{numeric:true}))) {
+        for(const [hr,attempts] of [...classAttempts].sort(([a],[b])=>a.localeCompare(b,undefined,{numeric:true}))) {
             const line=document.createElement('p');
             line.style.margin='4px 0';
-            line.textContent=`${hr}: ${students.size} ${students.size===1 ? 'student' : 'students'}`;
+            line.textContent=`${hr}：學生應考次數 ${attempts} 次`;
             footer.appendChild(line);
         }
+        const totalLine=document.createElement('p');
+        totalLine.style.marginTop='8px';
+        totalLine.textContent=`總數：${records?.length || 0} 次`;
+        footer.appendChild(totalLine);
         const totalFooter=footer.outerHTML;
         container.innerHTML = heading + printRecordSummary(records);
 
