@@ -85,6 +85,10 @@
             flex-wrap: nowrap;
         }
 
+        #exam-countdown {grid-column:3;grid-row:1;justify-self:end;text-align:center;padding:12px 18px;border-radius:12px;background:#eef2ff;color:#3730a3;font-weight:700;}
+        #exam-countdown strong {display:block;font-size:2rem;font-variant-numeric:tabular-nums;}
+        #exam-countdown.timer-warning {background:#fff1f2;color:#be123c;}
+        @media(max-width:760px) {#exam-countdown {grid-column:1;grid-row:auto;justify-self:end;}}
         /* Logo */
         .brand-logo { 
             width: 220px; 
@@ -103,6 +107,7 @@
         .header-text { 
             text-align: center;
             grid-column:2;
+            grid-row:1;
             min-width:0;
             padding-left:0;
         }
@@ -123,7 +128,7 @@
         }
         @media(max-width:1000px) {
             .header-container { grid-template-columns:1fr; row-gap:14px; }
-            .header-text { grid-column:1; width:100%; }
+            .header-text { grid-column:1; grid-row:auto; width:100%; }
             .brand-logo { grid-column:1; justify-self:start; }
         }
 
@@ -577,6 +582,7 @@
     <!-- Header (Logo + Title) -->
     <div class="header-container">
         <img src="LUYA_LOGO.jpg" alt="LUYA Academy Logo" class="brand-logo">
+        <div id="exam-countdown" class="hidden" role="timer" aria-label="Time remaining"><span>Time remaining</span><strong id="exam-countdown-value">30:00</strong></div>
         <div class="header-text">
             <h1>Online Examination System</h1>
             <div class="subtitle">Cloud Testing & Automated Scoring Portal</div>
@@ -866,11 +872,20 @@
 
     async function saveResultToCloud(dateStr, studentName, recordData) {
         if(recordData.uid && recordData.startedAt && !isCorrectionMode) {
-            const batch=writeBatch(db);
-            batch.set(doc(db,'records',recordData.recordId),recordData);
-            batch.update(doc(db,'examStarts',recordData.recordId),{status:'completed'});
-            await batch.commit();
-        } else await setDoc(doc(db, "records", recordData.recordId), recordData);
+            return runTransaction(db,async transaction=>{
+                const ref=doc(db,'records',recordData.recordId);
+                const existing=await transaction.get(ref);
+                if(existing.exists()) return {...existing.data(),recordId:recordData.recordId};
+                const saved=structuredClone(recordData);
+                if(Date.now()>=attemptDeadline(saved) && saved.submissionReason!=='fullscreen_exit') applyZeroGrade(saved,'time_limit');
+                saved.status='completed';
+                transaction.set(ref,saved);
+                transaction.update(doc(db,'examStarts',recordData.recordId),{status:'completed'});
+                return saved;
+            });
+        }
+        await setDoc(doc(db, "records", recordData.recordId), recordData);
+        return recordData;
     }
     async function getResultsFromCloud(unitId) {
         const snapshot = await getDocs(collection(db, "records"));
@@ -1041,11 +1056,15 @@
                 if(returnButton) {returnButton.textContent='Return to Menu';returnButton.setAttribute('onclick','returnToMenu()');}
             }
             if(screen==='screen-exam') {
+                if(!saved.isCorrectionMode && saved.activeRecord?.recordId) {
+                    const existing=await getDocFromServer(doc(db,'records',saved.activeRecord.recordId));
+                    if(existing.exists()) {isExamActive=false;viewPreviousResults(existing.data());return;}
+                }
                 questions=saved.questions || [];sectionDefs=saved.sectionDefs || {};currentIndex=saved.currentIndex || 0;
                 userAnswers=saved.userAnswers || {};isCorrectionMode=saved.isCorrectionMode===true;
                 activeRecord=saved.activeRecord;activeUnit=saved.activeUnit;
                 isExamActive=true;
-                if(questions.length) {renderQuestion(); prepareExamGuard(saved.examGuardCount || 0, saved.examGuardLocked===true);}
+                if(questions.length) {renderQuestion(); prepareExamGuard(saved.examGuardCount || 0, saved.examGuardLocked===true); startExamCountdown();}
             }
             requestAnimationFrame(()=>window.scrollTo(0,saved.scrollY || 0));
             await refresh;
@@ -1275,6 +1294,67 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         await auth.authStateReady();
         if(!auth.currentUser) await signInAnonymously(auth);
     }
+    function attemptDeadline(attempt) {return Date.parse(attempt.startedAt)+30*60*1000;}
+    function applyZeroGrade(record,reason='time_limit') {
+        record.score=0;record.forfeited=true;record.submissionReason=reason;
+        record.zeroReason=reason==='time_limit' ? 'No result saved within 30 minutes' : 'Second fullscreen/window departure';
+        record.status='completed';record.timeLimitMinutes=30;
+        record.deadlineAt=new Date(attemptDeadline(record)).toISOString();
+        if(reason==='time_limit') {
+            record.submittedAt=record.deadlineAt;
+            record.date=taiwanDateTime(record.deadlineAt).slice(0,10);
+        }
+        record.finalizedAt=new Date().toISOString();
+        record.details=(record.details || []).map(d=>({...d,earnedPoints:0}));
+        return record;
+    }
+    let finalizingExpired=false;
+    async function finalizeExpiredAttempts() {
+        // Existing rules allow only Administrator to close another student's attempt.
+        if(!isAdmin || finalizingExpired) return;
+        finalizingExpired=true;
+        const exams=new Map();
+        let failures=0;
+        try {
+            for(const attempt of examStarts.filter(a=>a.status==='in_progress' && Date.now()>=attemptDeadline(a))) {
+                const id=attempt.recordId || attempt.id;
+                try {
+                    // Check for a submitted result before loading a possibly changed question file.
+                    const known=await getDocFromServer(doc(db,'records',id));
+                    if(known.exists()) {attempt.status='completed';continue;}
+                    let snapshot=attempt.questionSnapshot;
+                    if(!Array.isArray(snapshot) || !snapshot.length) {
+                        const key=unitKey(attempt.book,attempt.unit);
+                        if(!exams.has(key))exams.set(key,await loadUnitExam(attempt.book,attempt.unit));
+                        snapshot=exams.get(key).questions;
+                    }
+                    const saved=await runTransaction(db,async transaction=>{
+                        const ref=doc(db,'records',id),startRef=doc(db,'examStarts',id);
+                        const [record,start]=await Promise.all([transaction.get(ref),transaction.get(startRef)]);
+                        if(record.exists())return {...record.data(),recordId:id};
+                        if(!start.exists() || start.data().status!=='in_progress' || Date.now()<attemptDeadline(start.data()))return null;
+                        const a=start.data();
+                        const result={...a,recordId:id,c_name:a.c_name || studentDirectory.find(s=>s.name===a.studentName && s.hr===a.studentHR)?.c_name || '',
+                            totalPossible:snapshot.reduce((sum,q)=>sum+q.points,0),
+                            details:snapshot.map(q=>({id:q.id,stem:q.stem,correctAns:q.answer,userAns:'No Answer',isCorrect:false,points:q.points,earnedPoints:0}))};
+                        delete result.questionSnapshot;
+                        applyZeroGrade(result);
+                        transaction.set(ref,result);transaction.update(startRef,{status:'completed'});
+                        return result;
+                    });
+                    if(saved) {attempt.status='completed';unitRecords=unitRecords.filter(r=>r.recordId!==id);unitRecords.push(saved);}
+                } catch(error) {
+                    failures++;
+                    console.error('Unable to finalize expired attempt:',id,error);
+                    document.getElementById('admin-sync-status').textContent='Some expired exams could not be recorded as 0. Check the connection and Unit question files, then reopen this page.';
+                }
+            }
+        } finally {finalizingExpired=false;}
+        if(failures)throw new Error(`${failures} expired exam(s) could not be recorded as 0. Check the connection and Unit question files.`);
+    }
+    function expiredOwnAttempt(book,unit) {
+        return examStarts.find(a=>Number(a.book)===Number(book) && Number(a.unit)===Number(unit) && sameStudent(a,currentStudent()) && Date.now()>=attemptDeadline(a));
+    }
     async function refreshExamStarts() {
         const snap=await getDocsFromServer(collection(db,'examStarts'));
         examStarts=snap.docs.map(d=>({...d.data(),id:d.id}));startsLoaded=true;
@@ -1284,6 +1364,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         unitStates=Object.fromEntries(states.docs.map(d=>[d.id,d.data()]));
         unitRecords=records.docs.map(d=>({...d.data(),recordId:d.id}));
         unitStatesLoaded=unitRecordsLoaded=true;
+        await finalizeExpiredAttempts();
         if(isAdmin) {
             const batch=writeBatch(db);let changed=false;
             for(const [key,value] of Object.entries(unitStates)) {
@@ -1327,11 +1408,12 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         do {crypto.getRandomValues(values);} while(values[0]>=4294000000);
         return String(values[0]%1000000).padStart(6,'0');
     }
-    async function authorizeExamStart(book,unit) {
+    async function authorizeExamStart(book,unit,exam) {
         await ensureStudentSession();
         await refreshPolicyData();
         const state=policyState(book,unit), student=currentStudent();
         if(unitRecords.some(r=>sameExam(r,state) && sameStudent(r,student))) throw new Error('You have already completed this exam. Please use corrections or view your result.');
+        if(expiredOwnAttempt(book,unit)) throw new Error('The 30-minute limit has passed. This attempt is scored 0 and cannot be restarted. Administrator will record the result when opening the system.');
         const regular=examPhase(state)==='active' && eligibleStudent(state,student);
         const missed=absenceEntries(student,[state],unitRecords,examStarts).some(e=>e.status==='pending');
         let host=null;
@@ -1356,7 +1438,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             const now=new Date().toISOString();
             const attempt={book,unit,unitId:unitKey(book,unit),studentName:currentUser,studentHR:currentUserHR,
                 uid:auth.currentUser.uid,startedAt:now,status:'in_progress',isMakeup:!!host,
-                originalExamDate:originalExamDate(fresh),hostId:host?.unitId || '',recordId:attemptId};
+                originalExamDate:originalExamDate(fresh),hostId:host?.unitId || '',recordId:attemptId,
+                questionSnapshot:exam.questions.map(q=>({id:q.id,stem:q.stem,answer:q.answer,points:q.points,type:q.type}))};
             transaction.set(ref,attempt);
             if(!fresh.hasParticipation) transaction.update(unitRef,{hasParticipation:true,participationId:attemptId});
             return attempt;
@@ -1585,6 +1668,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         try {
             const states=await getDocsFromServer(collection(db,'examUnits'));
             await refreshExamStarts();
+            await finalizeExpiredAttempts();
             // Do not overwrite newer local edits if an administrator opened the editor meanwhile.
             if(savingUnitClasses || pendingUnitClasses || isExamActive) return;
             const fresh=Object.fromEntries(states.docs.map(d=>[d.id,d.data()]));
@@ -1719,11 +1803,12 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             const records=unitRecords.filter(r=>(r.unitId===key || (Number(r.book)===book && Number(r.unit)===unit)) && isMine(r))
                 .sort((a,b)=>recordTime(b).localeCompare(recordTime(a)));
             const pending=records.find(r=>recordDetails(r).some(d=>!d.isCorrect));
+            if(!records.length && expiredOwnAttempt(book,unit)) {alert('Time limit reached: 0 points. Administrator will record the result when opening the system.');return;}
             if(!records.length && !canEnterUnit(book,unit)) return;
             if(records.length && !pending) {viewPreviousResults(records[0]);return;}
             const accepted=await confirmDatabaseWarning(pending
                 ? `${unitLabel(book,unit)}\n\nReady to correct your mistakes?\nPress OK to begin, or Cancel to return to the menu.`
-                : `${unitLabel(book,unit)}\n\nReady to take the test?\nPress OK to begin, or Cancel to return to the menu.`,
+                : `${unitLabel(book,unit)}\n\nYou have 30 minutes. If no result is saved by the deadline, the score is 0. A second fullscreen/window departure also results in 0 points. Ready to take the test?\nPress OK to begin, or Cancel to return to the menu.`,
                 pending ? '✍️ Correct Mistakes' : '📚 Start Exam');
             if(!accepted || isAdmin) return;
             if(!pending && !canEnterUnit(book,unit)) {
@@ -1743,6 +1828,10 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         const records=unitRecords.filter(r => (r.unitId===key || (r.book===selectedBook && r.unit===selectedUnit)) && isMine(r)).sort((a,b)=>recordTime(b).localeCompare(recordTime(a)));
         const pending=records.find(r=>recordDetails(r).some(d=>!d.isCorrect));
         const record=pending || records[0];
+        if(!record && expiredOwnAttempt(selectedBook,selectedUnit)) {
+            msg.textContent='Time limit reached: 0 points. Administrator will record the result when opening the system.';
+            return;
+        }
         if(!record && !canEnterUnit(selectedBook,selectedUnit)) {msg.textContent=classCanAccess(state,currentUserHR) && state?.scheduleEnabled ? scheduleLabel(state) : 'Please select a unit to take the test.';return;}
         document.getElementById('student-selected-unit').textContent=unitLabel(selectedBook,selectedUnit);
         msg.textContent=record ? `Initial Score: ${record.score}/${record.totalPossible} · Exam date: ${record.date}` : '✅ This unit is ready for your exam.';
@@ -1764,7 +1853,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         container.innerHTML = heading + '<p style="color: var(--text-muted); font-size: 0.9rem;">⏳ Loading Cloud Records...</p>';
 
         let records;
-        try { records = await getResultsFromCloud(targetUnit); } catch(error) { container.textContent="❌ Unable to load records."; return; }
+        try { await refreshExamStarts();await finalizeExpiredAttempts();records = await getResultsFromCloud(targetUnit); } catch(error) { container.textContent="❌ Unable to load records."; return; }
         if(targetUnit !== unitKey(selectedBook,selectedUnit)) return;
         container.innerHTML = heading + printRecordSummary(records);
 
@@ -1792,6 +1881,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             `).join('');
 
             recEl.innerHTML = `
+                <p>Submission reason: ${submissionReasonLabel(rec.submissionReason)}</p>
+                <p>Submission reason: ${submissionReasonLabel(rec.submissionReason)}</p>
                 <div class="record-summary">
                     <span style="font-size:1rem; font-weight:700;">👤 <span style="color:#16a34a;">${getStudentHR(rec.studentName, rec.studentHR)}</span> <span style="color:#0f172a;">${studentDisplayHTML(rec.studentName,rec.studentHR,rec.c_name)}</span></span>
                     <span>${recordLabel(rec)} · Exam date: ${rec.date}<br>Initial Score: <strong style="color: var(--primary-color); font-size: 1.1rem;">${rec.score} / ${rec.totalPossible}</strong> ${isFullyCorrected ? '<span style="color:var(--success-color); font-size:0.85rem; font-weight:700;">(Correction Complete)</span>' : '<span style="color:var(--danger-color); font-size:0.85rem; font-weight:700;">(Needs Correction)</span>'}</span>
@@ -2208,6 +2299,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
 
                 return `
                     <div class="student-record-item">
+                        <p>Submission reason: ${submissionReasonLabel(rec.submissionReason)}</p>
                         <div class="record-summary">
                             <span style="font-size: 1.1rem; font-weight: 700; color: var(--text-main);">📅 Date: ${rec.date}</span>
                             <span>${recordLabel(rec)} · Exam date: ${rec.date}<br>Initial Score: <strong style="color: var(--primary-color); font-size: 1.1rem;">${rec.score} / ${rec.totalPossible}</strong> 
@@ -2470,7 +2562,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         document.getElementById('result-student-name').innerText = `Student: ${studentDisplayName(studentRecord.studentName,studentRecord.studentHR,studentRecord.c_name)} (${studentRecord.date}) · ${recordLabel(studentRecord)}`;
         document.getElementById('final-score').innerText = `Initial Score: ${studentRecord.score} / ${studentRecord.totalPossible} Points`;
 
-        let resultListHtml = '';
+        let resultListHtml = `<p>Submission reason: ${submissionReasonLabel(studentRecord.submissionReason)}</p>`;
         (studentRecord.details || []).forEach(d => {
             resultListHtml += `
                 <div class="result-card ${d.isCorrect ? 'correct' : 'incorrect'}">
@@ -2511,10 +2603,11 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             }
             const exam=await loadUnitExam(book,unit);
             examLoadingMessage('Checking exam access and preparing your attempt. Please wait.');
-            const admission=isCorrection ? null : await authorizeExamStart(book,unit);
+            const admission=isCorrection ? null : await authorizeExamStart(book,unit,exam);
             if(!isCorrection && !admission) return;
             activeUnit={book,unit,unitId:unitKey(book,unit)};
             activeRecord=isCorrection ? structuredClone(correctionRecord) : {...admission,recordId:admission.recordId,studentName:currentUser,studentHR:currentUserHR,c_name:studentDirectory.find(s=>s.name===currentUser && s.hr===currentUserHR)?.c_name || '',...activeUnit,date:getFormattedDate(),score:0,totalPossible:0,details:[]};
+            delete activeRecord.questionSnapshot;
             if(isCorrection && !activeRecord) throw new Error('Correction record unavailable.');
             currentExamData=exam; sectionDefs=exam.sectionDefs || {}; isCorrectionMode=isCorrection;
             questions=isCorrection ? exam.questions.filter(q=>activeRecord.details.some(d=>d.id===q.id && !d.isCorrect)) : exam.questions;
@@ -2526,6 +2619,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             renderQuestion();
             savePageSession();
             prepareExamGuard();
+            startExamCountdown();
         } catch(error) {
             console.error('Exam entry failed:',error);
             alert(`❌ Unable to enter the exam.\n${error.message}\n\nIf this continues, show this message to your teacher.`);
@@ -2775,6 +2869,41 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     }
 
 
+    const EXAM_DURATION_MS=30*60*1000;
+    let examCountdownInterval;
+    function submissionReasonLabel(reason) {
+        return ({manual:'Manual submission',time_limit:'Time limit (30 minutes): 0 points',fullscreen_exit:'Second fullscreen/window departure: 0 points'})[reason] || 'Not recorded';
+    }
+    function stopExamCountdown() {
+        clearInterval(examCountdownInterval);
+        examCountdownInterval=undefined;
+        document.getElementById('exam-countdown').classList.add('hidden');
+    }
+    function examDeadline() {
+        return Date.parse(activeRecord?.startedAt)+EXAM_DURATION_MS;
+    }
+    function tickExamCountdown() {
+        if(!isExamActive || isCorrectionMode || savingResult) return;
+        const remaining=Math.max(0,Math.ceil((examDeadline()-Date.now())/1000));
+        if(!Number.isFinite(remaining)) return;
+        document.getElementById('exam-countdown-value').textContent=String(Math.floor(remaining/60)).padStart(2,'0')+':'+String(remaining%60).padStart(2,'0');
+        document.getElementById('exam-countdown').classList.toggle('timer-warning',remaining<=300);
+        if(remaining===0) {
+            saveCurrentAnswer();
+            examGuard.locked=true;
+            void showResults('time_limit');
+        }
+    }
+    function startExamCountdown() {
+        stopExamCountdown();
+        if(isCorrectionMode || !isExamActive) return;
+        document.getElementById('exam-countdown').classList.remove('hidden');
+        examCountdownInterval=setInterval(tickExamCountdown,250);
+        tickExamCountdown();
+    }
+    window.addEventListener('focus',tickExamCountdown);
+    document.addEventListener('visibilitychange',tickExamCountdown);
+
     // Formal-exam focus protection. One departure may produce several browser events.
     const examGuard = {active:false, count:0, episode:false, dialogDepth:0, settling:false, locked:false};
     let guardTimer, guardWatchdog;
@@ -2808,6 +2937,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         guardButton.disabled=true;
         try {
             await requestExamFullscreen();
+            if(!isExamActive || savingResult || examGuard.locked) return;
             if(document.hidden || !document.hasFocus()) throw new Error('Please return to the exam window to continue.');
             guardPanel.classList.add('hidden');
             examGuard.episode=false;
@@ -2827,7 +2957,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         examGuard.episode=false;
         if(isCorrectionMode) return;
         if(locked) {retryLockedSubmission();return;}
-        guardMessage('You must stay in fullscreen mode and keep the exam window active throughout the exam. Switching tabs or windows, clicking outside the exam window, or exiting fullscreen counts as a violation.\n\nThe first violation will trigger a warning. A second violation will immediately submit your exam automatically.\n\nClick “Enter Fullscreen” to start or continue.');
+        guardMessage('You must stay in fullscreen mode and keep the exam window active throughout the exam. Switching tabs or windows, clicking outside the exam window, or exiting fullscreen counts as a violation.\n\nThe first violation will trigger a warning. A second violation will immediately submit your exam with 0 points. If no result is saved within 30 minutes, the score is also 0.\n\nClick “Enter Fullscreen” to start or continue.');
         // A simulated click cannot restore user activation after loading or code verification.
         // Keep the instructions visible and wait for a real click in that case.
         if(fullscreenElement() || (typeof navigator!=='undefined' && navigator.userActivation?.isActive)) guardButton.click();
@@ -2853,18 +2983,25 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     }
     function retryLockedSubmission() {
         stopExamGuard();
-        showResults();
+        showResults(activeRecord?.submissionReason || 'fullscreen_exit');
     }
     function detectExamDeparture(reason) {
         if(!examGuard.active || !isExamActive || isCorrectionMode || savingResult || leavingSession || examGuard.dialogDepth || examGuard.settling || examGuard.episode) return;
+        if(Date.now()>=examDeadline()) {tickExamCountdown();return;}
         examGuard.episode=true;
         examGuard.count++;
+        if(activeRecord) {
+            activeRecord.departureCount=examGuard.count;
+            activeRecord.lastDepartureReason=reason;
+            activeRecord.lastDepartureAt=new Date().toISOString();
+        }
         saveCurrentAnswer();
         savePageSession();
         if(examGuard.count===1) {
-            guardMessage('⚠️ First Warning: '+reason+'\n\nYour exam has not been submitted. If you switch tabs or windows, or exit fullscreen again, your exam will be automatically submitted immediately.\n\nClick “Enter Fullscreen” to continue your exam.');
+            guardMessage('⚠️ First Warning: '+reason+'\n\nYour exam has not been submitted. If you switch tabs or windows, or exit fullscreen again, your exam will be automatically submitted with 0 points.\n\nClick “Enter Fullscreen” to continue your exam.');
         } else {
             examGuard.locked=true;
+            activeRecord.submissionReason='fullscreen_exit';
             savePageSession();
             retryLockedSubmission();
         }
@@ -2943,7 +3080,17 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         return u === c;
     }
 
-    async function showResults() {
+    async function showResults(reason='manual') {
+        if(savingResult) return;
+        if(!isCorrectionMode) {
+            saveCurrentAnswer();
+            activeRecord.submissionReason=activeRecord.submissionReason || (Date.now()>=examDeadline() ? 'time_limit' : reason);
+            activeRecord.timeLimitMinutes=30;
+            activeRecord.deadlineAt=new Date(examDeadline()).toISOString();
+            examGuard.locked=true;
+            savePageSession();
+        }
+        stopExamCountdown();
         stopExamGuard();
         isExamActive = false; // 解除防誤刷保護
 
@@ -3003,7 +3150,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         }
 
         try {
-            await saveResultToCloud(targetDate, currentUser, studentRecord);
+            if(!isCorrectionMode && ['time_limit','fullscreen_exit'].includes(studentRecord.submissionReason))applyZeroGrade(studentRecord,studentRecord.submissionReason);
+            studentRecord=await saveResultToCloud(targetDate, currentUser, studentRecord);
             activeRecord=studentRecord;
         } catch(error) {
             console.error('Result save failed:', error);
@@ -3037,7 +3185,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             </span>
         `;
 
-        let resultListHtml = '';
+        let resultListHtml = `<p>Submission reason: ${submissionReasonLabel(studentRecord.submissionReason)}</p>`;
         (studentRecord.details || []).forEach(d => {
             resultListHtml += `
                 <div class="result-card ${d.isCorrect ? 'correct' : 'incorrect'}">
@@ -3442,4 +3590,3 @@ window.exportWeeklyWord=async button=>{
 </script>
 </body>
 </html>
-
