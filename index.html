@@ -1308,15 +1308,19 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         return `${unitKey(book,unit)}_${hash}`;
     }
     async function showSharedMakeupCode() {
+        const version=++makeupPreviewVersion;
+        const selection=pendingUnitClasses;
         const box=document.getElementById('makeup-code-display');
+        const isCurrent=()=>version===makeupPreviewVersion && pendingUnitClasses===selection;
         box.textContent='';
-        if(!isAdmin) return;
+        if(!isAdmin || !selection) return;
         try {
             const selected=pendingUnitClasses ? unitStates[unitKey(pendingUnitClasses.book,pendingUnitClasses.unit)] : null;
             if(!selected?.generateMakeupCode) return;
             const snap=await getDocFromServer(doc(db,'makeupAdmin',selected?.makeupSessionId || 'current'));
-            if(snap.exists()) box.textContent=`Make-up Code: ${snap.data().code}`;
-        } catch(error) {box.textContent='Code unavailable. Check the updated Firestore rules.';}
+            if(!isCurrent()) return;
+            box.textContent=snap.exists() ? `Make-up Code: ${snap.data().code}` : 'Saved code unavailable. Check the connection and code record.';
+        } catch(error) {if(isCurrent()) box.textContent='Code unavailable. Check the updated Firestore rules.';}
     }
     function sixDigitCode() {
         const values=new Uint32Array(1);
@@ -1361,6 +1365,15 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         return result;
     }
     let makeupDraft=null, makeupPreviewVersion=0;
+    // A draft belongs only to the current editor session. Invalidate pending reads too.
+    function resetMakeupEditor(state={}) {
+        ++makeupPreviewVersion;
+        makeupDraft=null;
+        const generate=document.getElementById('generate-makeup-code');
+        generate.checked=state.generateMakeupCode===true;
+        generate.disabled=false;
+        document.getElementById('makeup-code-display').textContent='';
+    }
     function planMakeupCode(key,before,schedule) {
         // Find the connected group of overlapping enabled windows. Adjacent windows
         // are separate sessions; editing the same interval keeps its existing code.
@@ -1375,14 +1388,15 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         }
         const unchanged=before.generateMakeupCode && before.startsAt===schedule.startsAt && before.endsAt===schedule.endsAt;
         const candidateId=group.find(u=>u.makeupSessionId)?.makeupSessionId || (unchanged && before.makeupSessionId) || Array.from(crypto.getRandomValues(new Uint8Array(16)),v=>v.toString(16).padStart(2,'0')).join('');
-        const draftKey=JSON.stringify([key,schedule.startsAt,schedule.endsAt,group.map(u=>[u.unitId,u.makeupSessionId])]);
+        const draftKey=JSON.stringify([key,schedule.startsAt,schedule.endsAt,unchanged ? before.makeupSessionId : null,group.map(u=>[u.unitId,u.makeupSessionId])]);
         if(!makeupDraft || makeupDraft.key!==draftKey) makeupDraft={key:draftKey,sessionId:candidateId,code:sixDigitCode()};
         return {group,sessionId:makeupDraft.sessionId,proposedCode:makeupDraft.code};
     }
     async function previewMakeupCode() {
         const version=++makeupPreviewVersion;
         const box=document.getElementById('makeup-code-display');
-        if(!pendingUnitClasses || savingUnitClasses || !document.getElementById('generate-makeup-code').checked) {box.textContent='';return;}
+        if(!pendingUnitClasses || savingUnitClasses) return;
+        if(!document.getElementById('generate-makeup-code').checked) {makeupDraft=null;box.textContent='';return;}
         const {book,unit}=pendingUnitClasses;
         try {
             const schedule=readUnitSchedule();
@@ -1477,6 +1491,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     function closeUnitClasses() {
         if(savingUnitClasses) return;
         pendingUnitClasses=null;
+        resetMakeupEditor();
         document.getElementById('modal-unit-classes').classList.add('hidden');
     }
     async function confirmUnitClasses(keepOpen=true) {
@@ -1495,6 +1510,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             const saved=await persistUnitState(book,unit,{disabled:false},classes,keepOpen,schedule);
             if(saved) {
                 pendingUnitClasses=null;
+                resetMakeupEditor();
                 document.getElementById('modal-unit-classes').classList.add('hidden');
             }
         } finally {
@@ -1636,6 +1652,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             const boxes=[...document.querySelectorAll('#unit-class-options input[name="leaderboard-class"]')];
             boxes.forEach(box=>{box.checked=(state.allowedClasses || []).includes(box.value);});
             document.getElementById('unit-class-options-class-all').checked=boxes.length>0 && boxes.every(box=>box.checked);
+            resetMakeupEditor(state);
             pendingUnitClasses={book,unit};
             populateUnitSchedule(state);
             document.getElementById('unit-classes-title').textContent=`📚 ${unitLabel(book,unit)}`;
@@ -1659,7 +1676,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             if(locked) document.getElementById('unit-class-options').after(notice);
             else document.querySelector('#modal-unit-classes .makeup-settings').before(notice);
             closeButton.parentElement.style.marginTop='';
-            await showSharedMakeupCode();
+            void showSharedMakeupCode();
             document.getElementById('unit-class-confirm').textContent='Save';
             document.getElementById('modal-unit-classes').classList.remove('hidden');
             (locked ? closeButton : document.getElementById('unit-class-confirm')).focus();
