@@ -911,13 +911,17 @@
 
     const DEFAULT_PLACEHOLDER = "e.g., Peter Pan (Full English Name)";
 
+    function cloneExamData(value) {
+        // Exam records contain JSON-compatible data; support Safari before 15.4.
+        return typeof globalThis.structuredClone==='function' ? globalThis.structuredClone(value) : JSON.parse(JSON.stringify(value));
+    }
     async function saveResultToCloud(dateStr, studentName, recordData) {
         if(recordData.uid && recordData.startedAt && !isCorrectionMode) {
             return runTransaction(db,async transaction=>{
                 const ref=doc(db,'records',recordData.recordId);
                 const existing=await transaction.get(ref);
                 if(existing.exists()) return {...existing.data(),recordId:recordData.recordId};
-                const saved=structuredClone(recordData);
+                const saved=cloneExamData(recordData);
                 if(Date.now()>=attemptDeadline(saved) && saved.submissionReason!=='fullscreen_exit') applyZeroGrade(saved,'time_limit');
                 saved.status='completed';
                 transaction.set(ref,saved);
@@ -2660,7 +2664,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             const admission=isCorrection ? null : await authorizeExamStart(book,unit,exam);
             if(!isCorrection && !admission) return;
             activeUnit={book,unit,unitId:unitKey(book,unit)};
-            activeRecord=isCorrection ? structuredClone(correctionRecord) : {...admission,recordId:admission.recordId,studentName:currentUser,studentHR:currentUserHR,c_name:studentDirectory.find(s=>s.name===currentUser && s.hr===currentUserHR)?.c_name || '',...activeUnit,date:getFormattedDate(),score:0,totalPossible:0,details:[]};
+            activeRecord=isCorrection ? cloneExamData(correctionRecord) : {...admission,recordId:admission.recordId,studentName:currentUser,studentHR:currentUserHR,c_name:studentDirectory.find(s=>s.name===currentUser && s.hr===currentUserHR)?.c_name || '',...activeUnit,date:getFormattedDate(),score:0,totalPossible:0,details:[]};
             delete activeRecord.questionSnapshot;
             if(isCorrection && !activeRecord) throw new Error('Correction record unavailable.');
             currentExamData=exam; sectionDefs=exam.sectionDefs || {}; isCorrectionMode=isCorrection;
@@ -3100,7 +3104,37 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         };
     }
 
-    function submitExamWithCheck() {
+    let closeSubmitConfirmation = null;
+    function confirmExamSubmission(message) {
+        if(closeSubmitConfirmation) return Promise.resolve(false);
+        return new Promise(resolve=>{
+            const panel=document.createElement('div');
+            panel.className='modal-overlay';
+            panel.style.zIndex='9999';
+            panel.setAttribute('role','dialog');
+            panel.setAttribute('aria-modal','true');
+            panel.setAttribute('aria-label','Submit Exam');
+            panel.innerHTML='<div class="modal-card"><h3>Submit Exam</h3><p style="white-space:pre-line"></p><button type="button" class="btn">Continue Exam</button> <button type="button" class="btn btn-blue-grad">Submit Exam</button></div>';
+            panel.querySelector('p').textContent=message;
+            const buttons=panel.querySelectorAll('button');
+            const previous=document.activeElement;
+            closeSubmitConfirmation=(accepted=false)=>{
+                panel.remove();
+                closeSubmitConfirmation=null;
+                if(previous?.isConnected) previous.focus();
+                resolve(accepted);
+            };
+            buttons[0].onclick=()=>closeSubmitConfirmation(false);
+            buttons[1].onclick=()=>closeSubmitConfirmation(true);
+            panel.onkeydown=event=>{
+                if(event.key==='Tab') {event.preventDefault();(document.activeElement===buttons[0]?buttons[1]:buttons[0]).focus();}
+            };
+            document.body.appendChild(panel);
+            buttons[0].focus();
+        });
+    }
+
+    async function submitExamWithCheck() {
         if(savingResult || examGuard.locked) return;
         saveCurrentAnswer();
 
@@ -3119,7 +3153,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             confirmMsg = "✅ You have answered all the questions.\n\nAre you sure you want to submit your test?";
         }
 
-        if (confirm(confirmMsg)) {
+        if (await confirmExamSubmission(confirmMsg)) {
+            if(savingResult || examGuard.locked || !isExamActive) return;
             isExamActive = false; // 解除防護
             showResults();
         }
@@ -3148,6 +3183,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
 
     async function showResults(reason='manual') {
         if(savingResult) return;
+        if(closeSubmitConfirmation) closeSubmitConfirmation(false);
         if(!isCorrectionMode) {
             saveCurrentAnswer();
             activeRecord.submissionReason=activeRecord.submissionReason || (Date.now()>=examDeadline() ? 'time_limit' : reason);
@@ -3165,10 +3201,15 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
 
         if (savingResult) return;
         savingResult = true;
-        let studentRecord = structuredClone(activeRecord);
+        document.getElementById('result-status-title').textContent='Saving your result…';
+        document.getElementById('final-score').textContent='Please wait for confirmation.';
+        document.getElementById('result-list').textContent='';
+        let studentRecord,targetDate;
+        try {
+        studentRecord = cloneExamData(activeRecord);
         if (!isCorrectionMode) {studentRecord.date=activeRecord.submittedAt ? activeRecord.date : getFormattedDate();studentRecord.submittedAt=activeRecord.submittedAt || new Date().toISOString();activeRecord.date=studentRecord.date;activeRecord.submittedAt=studentRecord.submittedAt;}
         else studentRecord.correctedAt=new Date().toISOString();
-        const targetDate=studentRecord.date;
+        targetDate=studentRecord.date;
 
 
         if (isCorrectionMode && studentRecord.details && studentRecord.details.length > 0) {
@@ -3215,7 +3256,6 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             studentRecord.details = detailsRecord;
         }
 
-        try {
             if(!isCorrectionMode && ['time_limit','fullscreen_exit'].includes(studentRecord.submissionReason))applyZeroGrade(studentRecord,studentRecord.submissionReason);
             studentRecord=await saveResultToCloud(targetDate, currentUser, studentRecord);
             activeRecord=studentRecord;
@@ -3235,9 +3275,6 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             return;
         } finally {savingResult=false;}
 
-        if(!isCorrectionMode && fullscreenElement()) {
-            try {await (document.exitFullscreen || document.webkitExitFullscreen).call(document);} catch(error) {console.warn(error);}
-        }
         savePageSession();
         const remainingWrong = (studentRecord.details || []).filter(d => !d.isCorrect).length;
 
@@ -3269,6 +3306,14 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             `;
         });
         document.getElementById('result-list').innerHTML = resultListHtml;
+        // Render and preserve the saved result before requesting any fullscreen transition.
+        savePageSession();
+        if(!isCorrectionMode && fullscreenElement()) {
+            const exit=document.exitFullscreen || document.webkitExitFullscreen;
+            if(exit)try {Promise.resolve(exit.call(document)).catch(error=>console.warn('Fullscreen exit failed:',error));}
+            catch(error) {console.warn('Fullscreen exit failed:',error);}
+        }
+
     }
 
     function reportPrintButton() {
