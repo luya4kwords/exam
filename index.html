@@ -3034,16 +3034,35 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     }
     function stopExamGuard() {
         examGuard.active=false;
+        pendingDeparture=null;
         clearTimeout(guardTimer);
         clearInterval(guardWatchdog);
         guardWatchdog=undefined;
         examGuard.settling=false;
         guardPanel.classList.add('hidden');
     }
+    // Confirm a continuous departure instead of grading a single transient event.
+    let pendingDeparture = null;
+    const departureConfirmationMs = 1000;
     function checkExamEnvironment() {
-        if(document.hidden) detectExamDeparture('You left the exam tab.');
-        else if(!document.hasFocus()) detectExamDeparture('The exam window is no longer active.');
-        else if(!fullscreenElement()) detectExamDeparture('You exited fullscreen mode.');
+        if(!examGuard.active || !isExamActive || isCorrectionMode || savingResult || leavingSession || examGuard.dialogDepth || examGuard.settling || examGuard.episode) {
+            pendingDeparture=null;
+            return;
+        }
+        const reason=document.hidden ? 'You left the exam tab.'
+            : !fullscreenElement() ? 'You exited fullscreen mode.'
+            : !document.hasFocus() ? 'The exam window is no longer active.' : null;
+        const now=performance.now();
+        if(pendingDeparture && now-pendingDeparture.since>=departureConfirmationMs) {
+            // Also finalize on return if background throttling delayed the watchdog.
+            const confirmedReason=pendingDeparture.reason;
+            pendingDeparture=null;
+            detectExamDeparture(confirmedReason);
+            return;
+        }
+        if(!reason) {pendingDeparture=null;return;}
+        if(!pendingDeparture) pendingDeparture={since:now,reason};
+        else pendingDeparture.reason=reason;
     }
     function startGuardWatchdog() {
         clearInterval(guardWatchdog);
@@ -3076,12 +3095,12 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             retryLockedSubmission();
         }
     }
-    window.addEventListener('blur',()=>detectExamDeparture('The exam window is no longer active.'));
-    document.addEventListener('visibilitychange',()=>{if(document.hidden) detectExamDeparture('You left the exam tab.');});
+    window.addEventListener('blur',checkExamEnvironment);
+    document.addEventListener('visibilitychange',checkExamEnvironment);
     window.addEventListener('focus',checkExamEnvironment);
     window.addEventListener('pageshow',checkExamEnvironment);
     for(const event of ['fullscreenchange','webkitfullscreenchange'])
-        document.addEventListener(event,()=>{if(!fullscreenElement()) detectExamDeparture('You exited fullscreen mode.');});
+        document.addEventListener(event,checkExamEnvironment);
     // Native dialogs can generate delayed blur/fullscreen events. Resume only after
     // those events settle, with a fullscreen gate if the dialog exited fullscreen.
     for(const name of ['alert','confirm','prompt']) {
