@@ -1215,7 +1215,7 @@
         else if(/Windows/.test(ua)) operatingSystem='Windows';
         else if(/Macintosh|Mac OS X/.test(ua)) operatingSystem='macOS';
         else if(/Linux/.test(ua)) operatingSystem='Linux';
-        return {browserName,browserVersion,operatingSystem,userAgent:ua,appVersion:'2026-09-16-browser-info-1',capturedAt:new Date().toISOString()};
+        return {browserName,browserVersion,operatingSystem,userAgent:ua,appVersion:'2026-09-16-two-warnings-1',capturedAt:new Date().toISOString()};
     }
 
     let unitStates = {}, unitRecords = [], activeRecord = null, activeUnit = null;
@@ -1356,7 +1356,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     function attemptDeadline(attempt) {return Date.parse(attempt.startedAt)+30*60*1000;}
     function applyZeroGrade(record,reason='time_limit') {
         record.score=0;record.forfeited=true;record.submissionReason=reason;
-        record.zeroReason=reason==='time_limit' ? 'No result saved within 30 minutes' : 'Second fullscreen/window departure';
+        record.zeroReason=reason==='time_limit' ? 'No result saved within 30 minutes' : `Fullscreen/window departure limit reached (count: ${record.departureCount || 'unknown'})`;
         record.status='completed';record.timeLimitMinutes=30;
         record.deadlineAt=new Date(attemptDeadline(record)).toISOString();
         if(reason==='time_limit') {
@@ -1846,7 +1846,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             if(records.length && !pending) {viewPreviousResults(records[0]);return;}
             const accepted=await confirmDatabaseWarning(pending
                 ? `${unitLabel(book,unit)}\n\nReady to correct your mistakes?\nPress OK to begin, or Cancel to return to the menu.`
-                : `${unitLabel(book,unit)}\n\nYou have 30 minutes. If no result is saved by the deadline, the score is 0. A second fullscreen/window departure also results in 0 points. Ready to take the test?\nPress OK to begin, or Cancel to return to the menu.`,
+                : `${unitLabel(book,unit)}\n\nYou have 30 minutes. If no result is saved by the deadline, the score is 0. The first two fullscreen/window departures trigger warnings. A third departure results in 0 points. Ready to take the test?\nPress OK to begin, or Cancel to return to the menu.`,
                 pending ? '✍️ Correct Mistakes' : '📚 Start Exam');
             if(!accepted || isAdmin) return;
             if(!pending && !canEnterUnit(book,unit)) {
@@ -2945,7 +2945,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     const EXAM_DURATION_MS=30*60*1000;
     let examCountdownInterval;
     function submissionReasonLabel(reason) {
-        return ({manual:'Manual submission',time_limit:'Time limit (30 minutes): 0 points',fullscreen_exit:'Second fullscreen/window departure: 0 points'})[reason] || 'Not recorded';
+        return ({manual:'Manual submission',time_limit:'Time limit (30 minutes): 0 points',fullscreen_exit:'Fullscreen/window departure limit reached: 0 points'})[reason] || 'Not recorded';
     }
     function stopExamCountdown() {
         clearInterval(examCountdownInterval);
@@ -3042,7 +3042,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         examGuard.episode=false;
         if(isCorrectionMode) return;
         if(locked) {retryLockedSubmission();return;}
-        guardMessage('You must stay in fullscreen mode and keep the exam window active throughout the exam. Switching tabs or windows, clicking outside the exam window, or exiting fullscreen counts as a violation.\n\nThe first violation will trigger a warning. A second violation will immediately submit your exam with 0 points. If no result is saved within 30 minutes, the score is also 0.\n\nClick “Enter Fullscreen” to start or continue.');
+        guardMessage('You must stay in fullscreen mode and keep the exam window active throughout the exam. Switching tabs or windows, clicking outside the exam window, or exiting fullscreen counts as a violation.\n\nThe first two violations will each trigger a warning. A third violation will immediately submit your exam with 0 points. If no result is saved within 30 minutes, the score is also 0.\n\nClick “Enter Fullscreen” to start or continue.');
         // A simulated click cannot restore user activation after loading or code verification.
         // Keep the instructions visible and wait for a real click in that case.
         if(fullscreenElement() || (typeof navigator!=='undefined' && navigator.userActivation?.isActive)) guardButton.click();
@@ -3102,8 +3102,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         }
         saveCurrentAnswer();
         savePageSession();
-        if(examGuard.count===1) {
-            guardMessage('⚠️ First Warning: '+reason+'\n\nYour exam has not been submitted. If you switch tabs or windows, or exit fullscreen again, your exam will be automatically submitted with 0 points.\n\nClick “Enter Fullscreen” to continue your exam.');
+        if(examGuard.count<=2) {
+            guardMessage('⚠️ Warning '+examGuard.count+' of 2: '+reason+'\n\nYour exam has not been submitted. '+(examGuard.count===1 ? 'You have one warning remaining.' : 'This is your final warning. The next departure will automatically submit your exam with 0 points.')+'\n\nClick “Enter Fullscreen” to continue your exam.');
         } else {
             examGuard.locked=true;
             activeRecord.submissionReason='fullscreen_exit';
