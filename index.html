@@ -922,7 +922,7 @@
                 const existing=await transaction.get(ref);
                 if(existing.exists()) return {...existing.data(),recordId:recordData.recordId};
                 const saved=cloneExamData(recordData);
-                if(Date.now()>=attemptDeadline(saved) && saved.submissionReason!=='fullscreen_exit') applyZeroGrade(saved,'time_limit');
+                if(Date.now()>=attemptDeadline(saved) && saved.submissionReason!=='fullscreen_exit') finalizeAutomaticSubmission(saved,'time_limit');
                 saved.status='completed';
                 transaction.set(ref,saved);
                 transaction.update(doc(db,'examStarts',recordData.recordId),{status:'completed'});
@@ -1215,7 +1215,7 @@
         else if(/Windows/.test(ua)) operatingSystem='Windows';
         else if(/Macintosh|Mac OS X/.test(ua)) operatingSystem='macOS';
         else if(/Linux/.test(ua)) operatingSystem='Linux';
-        return {browserName,browserVersion,operatingSystem,userAgent:ua,appVersion:'2026-09-16-two-warnings-1',capturedAt:new Date().toISOString()};
+        return {browserName,browserVersion,operatingSystem,userAgent:ua,appVersion:'2026-09-16-auto-submit-scoring-1',capturedAt:new Date().toISOString()};
     }
 
     let unitStates = {}, unitRecords = [], activeRecord = null, activeUnit = null;
@@ -1354,9 +1354,10 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         if(!auth.currentUser) await signInAnonymously(auth);
     }
     function attemptDeadline(attempt) {return Date.parse(attempt.startedAt)+30*60*1000;}
-    function applyZeroGrade(record,reason='time_limit') {
-        record.score=0;record.forfeited=true;record.submissionReason=reason;
-        record.zeroReason=reason==='time_limit' ? 'No result saved within 30 minutes' : `Fullscreen/window departure limit reached (count: ${record.departureCount || 'unknown'})`;
+    function finalizeAutomaticSubmission(record,reason='time_limit') {
+        record.score=(record.details || []).reduce((sum,d)=>sum+(Number(d.earnedPoints)||0),0);
+        record.forfeited=false;record.submissionReason=reason;
+        delete record.zeroReason;
         record.status='completed';record.timeLimitMinutes=30;
         record.deadlineAt=new Date(attemptDeadline(record)).toISOString();
         if(reason==='time_limit') {
@@ -1364,7 +1365,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             record.date=taiwanDateTime(record.deadlineAt).slice(0,10);
         }
         record.finalizedAt=new Date().toISOString();
-        record.details=(record.details || []).map(d=>({...d,earnedPoints:0}));
+        // Preserve earned points and answers for both automatic submission reasons.
         return record;
     }
     let finalizingExpired=false;
@@ -1397,7 +1398,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                             totalPossible:snapshot.reduce((sum,q)=>sum+q.points,0),
                             details:snapshot.map(q=>({id:q.id,stem:q.stem,correctAns:q.answer,userAns:'No Answer',isCorrect:false,points:q.points,earnedPoints:0}))};
                         delete result.questionSnapshot;
-                        applyZeroGrade(result);
+                        result.answerDataUnavailable=true;
+                        finalizeAutomaticSubmission(result);
                         transaction.set(ref,result);transaction.update(startRef,{status:'completed'});
                         return result;
                     });
@@ -1405,11 +1407,11 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 } catch(error) {
                     failures++;
                     console.error('Unable to finalize expired attempt:',id,error);
-                    document.getElementById('admin-sync-status').textContent='Some expired exams could not be recorded as 0. Check the connection and Unit question files, then reopen this page.';
+                    document.getElementById('admin-sync-status').textContent='Some expired exams could not be finalized. Check the connection and Unit question files, then reopen this page.';
                 }
             }
         } finally {finalizingExpired=false;}
-        if(failures)throw new Error(`${failures} expired exam(s) could not be recorded as 0. Check the connection and Unit question files.`);
+        if(failures)throw new Error(`${failures} expired exam(s) could not be finalized. Check the connection and Unit question files.`);
     }
     function expiredOwnAttempt(book,unit) {
         return examStarts.find(a=>Number(a.book)===Number(book) && Number(a.unit)===Number(unit) && sameStudent(a,currentStudent()) && Date.now()>=attemptDeadline(a));
@@ -1841,12 +1843,12 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             const records=unitRecords.filter(r=>(r.unitId===key || (Number(r.book)===book && Number(r.unit)===unit)) && isMine(r))
                 .sort((a,b)=>recordTime(b).localeCompare(recordTime(a)));
             const pending=records.find(r=>recordDetails(r).some(d=>!d.isCorrect));
-            if(!records.length && expiredOwnAttempt(book,unit)) {alert('Time limit reached: 0 points. Administrator will record the result when opening the system.');return;}
+            if(!records.length && expiredOwnAttempt(book,unit)) {alert('Time limit reached. No submitted answers are available on the server. Please contact Administrator.');return;}
             if(!records.length && !canEnterUnit(book,unit)) return;
             if(records.length && !pending) {viewPreviousResults(records[0]);return;}
             const accepted=await confirmDatabaseWarning(pending
                 ? `${unitLabel(book,unit)}\n\nReady to correct your mistakes?\nPress OK to begin, or Cancel to return to the menu.`
-                : `${unitLabel(book,unit)}\n\nYou have 30 minutes. If no result is saved by the deadline, the score is 0. The first two fullscreen/window departures trigger warnings. A third departure results in 0 points. Ready to take the test?\nPress OK to begin, or Cancel to return to the menu.`,
+                : `${unitLabel(book,unit)}\n\nYou have 30 minutes. At the deadline, your exam is automatically submitted and answered questions are graded. The first two fullscreen/window departures trigger warnings. A third departure automatically submits your exam; answered questions are graded. Ready to take the test?\nPress OK to begin, or Cancel to return to the menu.`,
                 pending ? '✍️ Correct Mistakes' : '📚 Start Exam');
             if(!accepted || isAdmin) return;
             if(!pending && !canEnterUnit(book,unit)) {
@@ -1867,7 +1869,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         const pending=records.find(r=>recordDetails(r).some(d=>!d.isCorrect));
         const record=pending || records[0];
         if(!record && expiredOwnAttempt(selectedBook,selectedUnit)) {
-            msg.textContent='Time limit reached: 0 points. Administrator will record the result when opening the system.';
+            msg.textContent='Time limit reached. No submitted answers are available on the server. Please contact Administrator.';
             return;
         }
         if(!record && !canEnterUnit(selectedBook,selectedUnit)) {msg.textContent=classCanAccess(state,currentUserHR) && state?.scheduleEnabled ? scheduleLabel(state) : 'Please select a unit to take the test.';return;}
@@ -2945,7 +2947,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     const EXAM_DURATION_MS=30*60*1000;
     let examCountdownInterval;
     function submissionReasonLabel(reason) {
-        return ({manual:'Manual submission',time_limit:'Time limit (30 minutes): 0 points',fullscreen_exit:'Fullscreen/window departure limit reached: 0 points'})[reason] || 'Not recorded';
+        return ({manual:'Manual submission',time_limit:'Automatic submission: time limit (30 minutes)',fullscreen_exit:'Automatic submission: fullscreen/window departure limit reached'})[reason] || 'Not recorded';
     }
     function stopExamCountdown() {
         clearInterval(examCountdownInterval);
@@ -3042,7 +3044,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         examGuard.episode=false;
         if(isCorrectionMode) return;
         if(locked) {retryLockedSubmission();return;}
-        guardMessage('You must stay in fullscreen mode and keep the exam window active throughout the exam. Switching tabs or windows, clicking outside the exam window, or exiting fullscreen counts as a violation.\n\nThe first two violations will each trigger a warning. A third violation will immediately submit your exam with 0 points. If no result is saved within 30 minutes, the score is also 0.\n\nClick “Enter Fullscreen” to start or continue.');
+        guardMessage('You must stay in fullscreen mode and keep the exam window active throughout the exam. Switching tabs or windows, clicking outside the exam window, or exiting fullscreen counts as a violation.\n\nThe first two violations will each trigger a warning. A third violation will immediately submit your exam. At 30 minutes, your exam is also automatically submitted. In both cases, answered questions are graded normally; unanswered questions receive 0 points.\n\nClick “Enter Fullscreen” to start or continue.');
         // A simulated click cannot restore user activation after loading or code verification.
         // Keep the instructions visible and wait for a real click in that case.
         if(fullscreenElement() || (typeof navigator!=='undefined' && navigator.userActivation?.isActive)) guardButton.click();
@@ -3103,7 +3105,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         saveCurrentAnswer();
         savePageSession();
         if(examGuard.count<=2) {
-            guardMessage('⚠️ Warning '+examGuard.count+' of 2: '+reason+'\n\nYour exam has not been submitted. '+(examGuard.count===1 ? 'You have one warning remaining.' : 'This is your final warning. The next departure will automatically submit your exam with 0 points.')+'\n\nClick “Enter Fullscreen” to continue your exam.');
+            guardMessage('⚠️ Warning '+examGuard.count+' of 2: '+reason+'\n\nYour exam has not been submitted. '+(examGuard.count===1 ? 'You have one warning remaining.' : 'This is your final warning. The next departure will automatically submit your exam. Answered questions will be graded normally.')+'\n\nClick “Enter Fullscreen” to continue your exam.');
         } else {
             examGuard.locked=true;
             activeRecord.submissionReason='fullscreen_exit';
@@ -3292,7 +3294,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         }
 
             if(!isCorrectionMode) studentRecord.submissionClientInfo=collectExamClientInfo();
-            if(!isCorrectionMode && ['time_limit','fullscreen_exit'].includes(studentRecord.submissionReason))applyZeroGrade(studentRecord,studentRecord.submissionReason);
+            if(!isCorrectionMode && ['time_limit','fullscreen_exit'].includes(studentRecord.submissionReason))finalizeAutomaticSubmission(studentRecord,studentRecord.submissionReason);
             studentRecord=await saveResultToCloud(targetDate, currentUser, studentRecord);
             activeRecord=studentRecord;
         } catch(error) {
