@@ -68,11 +68,20 @@
         .schedule-columns input,.schedule-columns select {font:inherit;border:1px solid #cbd5e1;border-radius:7px;padding:6px;max-width:100%;}
         .schedule-columns label {display:block;font-weight:700;margin-bottom:6px;}
         .makeup-settings {margin:16px 0;padding:14px 16px;border:1px solid #c7d2fe;border-radius:12px;background:#f5f7ff;}
-        .makeup-settings label {font-weight:700;display:flex;gap:8px;align-items:center;}
+        .makeup-settings fieldset {border:0;margin:0;padding:0;}
+        .makeup-settings legend {font-weight:700;color:#3730a3;margin-bottom:8px;}
+        .makeup-settings label {font-weight:700;display:flex;gap:8px;align-items:center;margin:6px 0;}
         #makeup-code-display {font-size:1.2rem;letter-spacing:1px;font-weight:700;color:#4338ca;margin-top:8px;}
+        .duration-settings {margin:16px 0;padding:14px 16px;border:1px solid #cbd5e1;border-radius:12px;background:#f8fafc;}
+        .duration-settings label {font-weight:700;display:block;margin-bottom:8px;}
+        .duration-settings select {font:inherit;border:1px solid #cbd5e1;border-radius:7px;padding:8px 10px;min-width:140px;}
         #unit-schedule-notice {font-size:.85rem;color:#64748b;margin:10px 0;}
         #modal-unit-classes fieldset + #unit-schedule-notice {margin-top:4px;}
-        @media(max-width:420px) {.schedule-columns {grid-template-columns:1fr;}}
+        #modal-absent-units .modal-card {max-width:520px;max-height:90vh;overflow-y:auto;}
+        #absent-unit-options {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;max-height:280px;overflow-y:auto;padding:4px 0;}
+        #absent-unit-options label {display:flex;align-items:center;gap:7px;padding:8px 10px;border:1px solid #e9d5ff;border-radius:8px;cursor:pointer;font-weight:600;background:#faf5ff;color:#6b21a8;}
+        #absent-unit-options label.absent-all {grid-column:1 / -1;background:#eff6ff;border-color:#bfdbfe;color:#1d4ed8;font-weight:800;}
+        @media(max-width:420px) {.schedule-columns {grid-template-columns:1fr;} #absent-unit-options {grid-template-columns:1fr;}}
 
         /* Header Layout */
         .header-container {
@@ -739,8 +748,7 @@
         <fieldset style="margin:12px 0 4px;padding:12px;border:1px solid #cbd5e1;border-radius:8px;">
             <legend>Availability Schedule</legend>
             <label><input id="unit-schedule-enabled" type="checkbox" checked disabled> Enable schedule</label>
-            <p style="font-size:0.85rem;margin:8px 0;">This schedule applies only to formal exams. Students can review past exams and complete corrections at any time.</p>
-            <div id="unit-schedule-fields" class="schedule-columns">
+            <div id="unit-schedule-fields" class="schedule-columns" style="margin-top:10px;">
                 <div><label for="unit-start-date">Start Date &amp; Time</label>
                 <input id="unit-start-date" type="date" style="width:100%;margin-bottom:8px;">
                 <div><select id="unit-start-hour" aria-label="Start hour"></select> : <select id="unit-start-minute" aria-label="Start minute"></select></div></div>
@@ -751,16 +759,36 @@
         </fieldset>
         <p id="unit-schedule-notice" role="status"></p>
         <div class="makeup-settings">
-            <label><input id="generate-makeup-code" type="checkbox"> Generate Make-up Code</label>
-            <p style="font-size:.85rem;margin-top:8px;">Use this code for all eligible make-up exams during this supervised session.</p>
+            <fieldset>
+                <legend>Make-up Exam</legend>
+                <label><input id="makeup-mode-code" name="makeup-mode" type="radio" value="code"> Generate Make-up Code</label>
+                <label><input id="makeup-mode-nocode" name="makeup-mode" type="radio" value="nocode"> No Code Required</label>
+            </fieldset>
             <div id="makeup-code-display" role="status"></div>
+        </div>
+        <div class="duration-settings">
+            <label for="unit-exam-duration">Exam Duration:</label>
+            <select id="unit-exam-duration" aria-label="Exam duration in minutes"></select>
         </div>
         <button id="unit-class-off" class="hidden" disabled>Off</button>
         <p style="margin-bottom:12px;">Select classes eligible for this exam.</p>
-        <div id="unit-class-options" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;max-height:280px;overflow-y:auto;"></div>
+        <div id="unit-class-options" style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;max-height:280px;overflow-y:auto;"></div>
         <div class="modal-btn-row">
             <button id="unit-class-cancel" class="btn btn-secondary" onclick="closeUnitClasses()">Cancel</button>
             <button id="unit-class-confirm" class="btn" onclick="confirmUnitClasses()">Save</button>
+        </div>
+    </div>
+</div>
+
+<!-- Absent Units Selection Modal -->
+<div id="modal-absent-units" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="absent-units-title">
+    <div class="modal-card">
+        <h3 id="absent-units-title" class="modal-title">⛔ Select Units for Absent List</h3>
+        <p style="font-size:0.9rem;color:#64748b;margin-bottom:12px;">Choose completed units to count absences. Use All to select every listed unit.</p>
+        <div id="absent-unit-options"></div>
+        <div class="modal-btn-row">
+            <button class="btn btn-secondary" onclick="closeAbsentUnitsModal()">Cancel</button>
+            <button class="btn" onclick="submitAbsentUnitsSelection()">Show Absent List</button>
         </div>
     </div>
 </div>
@@ -1334,7 +1362,13 @@ function mayReplaceSchedule(state,records,attempts=[],now=Date.now()) {
     return !state?.hasParticipation && !hasParticipation(state,records,attempts);
 }
 function makeupHosts(states,now=Date.now()) {
+    return states.filter(state=>(state.generateMakeupCode===true || state.allowNoCodeMakeup===true) && examPhase(state,now)==='active');
+}
+function codeMakeupHosts(states,now=Date.now()) {
     return states.filter(state=>state.generateMakeupCode===true && examPhase(state,now)==='active');
+}
+function noCodeMakeupHosts(states,now=Date.now()) {
+    return states.filter(state=>state.allowNoCodeMakeup===true && examPhase(state,now)==='active');
 }
 function studentUnitPresentation(state,student,records,states,attempts=[],now=Date.now()) {
     const completed=records.some(record=>sameExam(record,state) && sameStudent(record,student));
@@ -1353,12 +1387,16 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         await auth.authStateReady();
         if(!auth.currentUser) await signInAnonymously(auth);
     }
-    function attemptDeadline(attempt) {return Date.parse(attempt.startedAt)+30*60*1000;}
+    function attemptDurationMinutes(attempt) {
+        const mins=Number(attempt?.examDurationMinutes);
+        return Number.isFinite(mins) && mins>0 ? mins : 30;
+    }
+    function attemptDeadline(attempt) {return Date.parse(attempt.startedAt)+attemptDurationMinutes(attempt)*60*1000;}
     function finalizeAutomaticSubmission(record,reason='time_limit') {
         record.score=(record.details || []).reduce((sum,d)=>sum+(Number(d.earnedPoints)||0),0);
         record.forfeited=false;record.submissionReason=reason;
         delete record.zeroReason;
-        record.status='completed';record.timeLimitMinutes=30;
+        record.status='completed';record.timeLimitMinutes=attemptDurationMinutes(record);
         record.deadlineAt=new Date(attemptDeadline(record)).toISOString();
         if(reason==='time_limit') {
             record.submittedAt=record.deadlineAt;
@@ -1487,13 +1525,21 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         if(!regular) {
             const hosts=makeupHosts(statesForPolicy());
             if(!missed || !hosts.length) throw new Error('Make-up exams are only available during a supervised exam session.');
-            const code=prompt('Enter the 6-digit make-up code provided by your teacher:');
-            if(code===null) return null;
-            if(!/^\d{6}$/.test(code.trim())) throw new Error('Please enter a 6-digit code.');
-            host=hosts.sort((a,b)=>Date.parse(b.endsAt)-Date.parse(a.endsAt))[0];
-            try {
-                await setDoc(doc(db,'makeupChecks',auth.currentUser.uid),{code:code.trim(),hostId:host.unitId});
-            } catch(error) {throw new Error('Invalid make-up code, expired session, or unavailable verification. Please ask your teacher.');}
+            const noCodeHosts=noCodeMakeupHosts(statesForPolicy());
+            const codeHosts=codeMakeupHosts(statesForPolicy());
+            if(noCodeHosts.length) {
+                host=noCodeHosts.sort((a,b)=>Date.parse(b.endsAt)-Date.parse(a.endsAt))[0];
+            } else if(codeHosts.length) {
+                const code=prompt('Enter the 6-digit make-up code provided by your teacher:');
+                if(code===null) return null;
+                if(!/^\d{6}$/.test(code.trim())) throw new Error('Please enter a 6-digit code.');
+                host=codeHosts.sort((a,b)=>Date.parse(b.endsAt)-Date.parse(a.endsAt))[0];
+                try {
+                    await setDoc(doc(db,'makeupChecks',auth.currentUser.uid),{code:code.trim(),hostId:host.unitId});
+                } catch(error) {throw new Error('Invalid make-up code, expired session, or unavailable verification. Please ask your teacher.');}
+            } else {
+                throw new Error('Make-up exams are only available during a supervised exam session.');
+            }
         }
         const attemptId=await stableAttemptId(book,unit);
         const ref=doc(db,'examStarts',attemptId), unitRef=doc(db,'examUnits',unitKey(book,unit));
@@ -1503,8 +1549,10 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             const fresh={...latest.data(),unitId:unitKey(book,unit)};
             if(!host && (examPhase(fresh)!=='active' || !eligibleStudent(fresh,student))) throw new Error('The exam entry time has ended.');
             const now=new Date().toISOString();
+            const durationMins=Number(fresh.examDurationMinutes);
             const attempt={book,unit,unitId:unitKey(book,unit),studentName:currentUser,studentHR:currentUserHR,
                 uid:auth.currentUser.uid,startedAt:now,status:'in_progress',isMakeup:!!host,
+                examDurationMinutes:Number.isFinite(durationMins) && durationMins>0 ? durationMins : 15,
                 clientInfo:collectExamClientInfo(),
                 originalExamDate:originalExamDate(fresh),hostId:host?.unitId || '',recordId:attemptId,
                 questionSnapshot:exam.questions.map(q=>({id:q.id,stem:q.stem,answer:q.answer,points:q.points,type:q.type}))};
@@ -1520,10 +1568,32 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     function resetMakeupEditor(state={}) {
         ++makeupPreviewVersion;
         makeupDraft=null;
-        const generate=document.getElementById('generate-makeup-code');
-        generate.checked=state.generateMakeupCode===true;
-        generate.disabled=false;
+        const codeRadio=document.getElementById('makeup-mode-code');
+        const noCodeRadio=document.getElementById('makeup-mode-nocode');
+        const useCode=state.generateMakeupCode===true;
+        const useNoCode=state.allowNoCodeMakeup===true;
+        codeRadio.checked=useCode || (!useCode && !useNoCode);
+        noCodeRadio.checked=useNoCode && !useCode;
+        codeRadio.disabled=false;
+        noCodeRadio.disabled=false;
         document.getElementById('makeup-code-display').textContent='';
+        populateExamDurationSelect(state.examDurationMinutes);
+    }
+    function isMakeupCodeMode() {
+        return document.getElementById('makeup-mode-code').checked;
+    }
+    function populateExamDurationSelect(selectedMinutes) {
+        const select=document.getElementById('unit-exam-duration');
+        const current=Number(selectedMinutes);
+        const value=Number.isFinite(current) && current>=5 && current<=60 ? current : 15;
+        select.replaceChildren();
+        for(let m=5;m<=60;m+=5) select.add(new Option(`${m} minutes`, String(m)));
+        select.value=String(value);
+    }
+    function readExamDurationMinutes() {
+        const mins=Number(document.getElementById('unit-exam-duration').value);
+        if(!Number.isFinite(mins) || mins<5 || mins>60) throw new Error('Please choose an exam duration between 5 and 60 minutes.');
+        return mins;
     }
     function planMakeupCode(key,before,schedule) {
         // Find the connected group of overlapping enabled windows. Adjacent windows
@@ -1547,7 +1617,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         const version=++makeupPreviewVersion;
         const box=document.getElementById('makeup-code-display');
         if(!pendingUnitClasses || savingUnitClasses) return;
-        if(!document.getElementById('generate-makeup-code').checked) {makeupDraft=null;box.textContent='';return;}
+        if(!isMakeupCodeMode()) {makeupDraft=null;box.textContent='';return;}
         const {book,unit}=pendingUnitClasses;
         try {
             const schedule=readUnitSchedule();
@@ -1566,7 +1636,9 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             throw new Error('This schedule is locked because a student has started or completed the exam. Use make-up exams instead.');
         if(!schedule?.scheduleEnabled || Date.parse(schedule.endsAt)<=Date.now()) throw new Error('Please set a future end time.');
         await loadUnitExam(book,unit);
-        const codeEnabled=document.getElementById('generate-makeup-code').checked;
+        const codeEnabled=isMakeupCodeMode();
+        const allowNoCode=!codeEnabled;
+        const examDurationMinutes=readExamDurationMinutes();
         const {group,sessionId,proposedCode}=planMakeupCode(key,before,schedule);
         const control=doc(db,'makeupAdmin',sessionId);
         const unitRef=doc(db,'examUnits',key);
@@ -1579,7 +1651,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             const state={...prior,...schedule,book,unit,isOpen:true,examClasses:classes,allowedClasses:classes,
                 openedDate:taiwanDateTime(schedule.startsAt).slice(0,10),
                 startMs:Date.parse(schedule.startsAt),endMs:Date.parse(schedule.endsAt),
-                generateMakeupCode:codeEnabled,updatedAt:new Date().toISOString(),policyVersion:2,
+                generateMakeupCode:codeEnabled,allowNoCodeMakeup:allowNoCode,
+                examDurationMinutes,updatedAt:new Date().toISOString(),policyVersion:2,
                 availabilityHistory:[{startsAt:schedule.startsAt,endsAt:schedule.endsAt}]};
             delete state.unitId;
             if(codeEnabled) {
@@ -1592,6 +1665,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                         throw new Error('Another schedule changed. Please refresh and save again.');
                     transaction.update(doc(db,'examUnits',group[index].unitId),{makeupSessionId:sessionId});
                 });
+            } else {
+                delete state.makeupSessionId;
             }
             transaction.set(unitRef,state);
             return state;
@@ -1782,10 +1857,13 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             document.getElementById('unit-classes-title').textContent=`📚 ${unitLabel(book,unit)}`;
             document.getElementById('unit-class-off').classList.add('hidden');
             const locked=state.hasParticipation || !mayReplaceSchedule(state,unitRecords,examStarts);
-            document.querySelectorAll('#unit-schedule-fields input,#unit-schedule-fields select,#unit-class-options input').forEach(el=>el.disabled=locked);
-            const generate=document.getElementById('generate-makeup-code');
-            generate.checked=state.generateMakeupCode===true;generate.disabled=locked;
-            generate.onchange=previewMakeupCode;
+            document.querySelectorAll('#unit-schedule-fields input,#unit-schedule-fields select,#unit-class-options input,#unit-exam-duration').forEach(el=>el.disabled=locked);
+            const codeRadio=document.getElementById('makeup-mode-code');
+            const noCodeRadio=document.getElementById('makeup-mode-nocode');
+            codeRadio.disabled=locked;noCodeRadio.disabled=locked;
+            const onMakeupModeChange=()=>{if(!locked) void previewMakeupCode();};
+            codeRadio.onchange=onMakeupModeChange;
+            noCodeRadio.onchange=onMakeupModeChange;
             document.querySelectorAll('#unit-schedule-fields input,#unit-schedule-fields select').forEach(el=>el.onchange=()=>{if(!locked) void previewMakeupCode();});
             const closeButton=document.getElementById('unit-class-cancel');
             closeButton.textContent=locked ? 'Close' : 'Cancel';
@@ -1951,7 +2029,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             `).join('');
 
             recEl.innerHTML = `
-                <p>Submission reason: ${submissionReasonLabel(rec.submissionReason)}</p>
+                <p>Submission reason: ${submissionReasonLabel(rec.submissionReason, attemptDurationMinutes(rec))}</p>
                 <div class="record-summary">
                     <span style="font-size:1rem; font-weight:700;">👤 <span style="color:#16a34a;">${getStudentHR(rec.studentName, rec.studentHR)}</span> <span style="color:#0f172a;">${studentDisplayHTML(rec.studentName,rec.studentHR,rec.c_name)}</span></span>
                     <span>${recordLabel(rec)} · Exam date: ${rec.date}<br>Initial Score: <strong style="color: var(--primary-color); font-size: 1.1rem;">${rec.score} / ${rec.totalPossible}</strong> ${isPerfectScore ? '<span style="color:var(--success-color); font-size:0.85rem; font-weight:700;">(Perfect Score)</span>' : isFullyCorrected ? '<span style="color:var(--success-color); font-size:0.85rem; font-weight:700;">(Correction Complete)</span>' : '<span style="color:var(--danger-color); font-size:0.85rem; font-weight:700;">(Needs Correction)</span>'}</span>
@@ -2096,49 +2174,190 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         container.innerHTML = tableHtml;
     }
 
+    let pendingAbsentUnitIds=null;
+    function closeAbsentUnitsModal() {
+        document.getElementById('modal-absent-units').classList.add('hidden');
+        pendingAbsentUnitIds=null;
+    }
+    window.closeAbsentUnitsModal=closeAbsentUnitsModal;
     async function calculateAbsentStudents() {
         if(!isAdmin)return;
-        const container = document.getElementById('records-list');
-        container.innerHTML = '<p style="color: var(--text-muted); font-size: 0.9rem;">⏳ Scanning all absentee records...</p>';
-
         try {
             await refreshPolicyData();
             const states=statesForPolicy();
-            const examDates=states.filter(state=>examWindow(state) && Date.now()>=examWindow(state).end).map(state=>state.unitId);
+            const completedUnits=states
+                .filter(state=>examWindow(state) && Date.now()>=examWindow(state).end)
+                .sort((a,b)=>unitLabel(a.book,a.unit).localeCompare(unitLabel(b.book,b.unit),undefined,{numeric:true}));
+            if(!completedUnits.length) {
+                document.getElementById('records-list').innerHTML='<p style="color:var(--text-muted);font-size:0.9rem;">No completed exam units were found yet.</p>';
+                return;
+            }
+            const container=document.getElementById('absent-unit-options');
+            container.replaceChildren();
+            const allLabel=document.createElement('label');
+            allLabel.className='absent-all';
+            const allCb=document.createElement('input');
+            allCb.type='checkbox';
+            allCb.id='absent-unit-all';
+            allLabel.append(allCb, document.createTextNode('All'));
+            container.appendChild(allLabel);
+            const unitBoxes=[];
+            completedUnits.forEach((state,index)=>{
+                const label=document.createElement('label');
+                const cb=document.createElement('input');
+                cb.type='checkbox';
+                cb.name='absent-unit';
+                cb.value=state.unitId;
+                cb.id=`absent-unit-${index}`;
+                label.htmlFor=cb.id;
+                label.append(cb, document.createTextNode(unitLabel(state.book,state.unit)));
+                container.appendChild(label);
+                unitBoxes.push(cb);
+            });
+            allCb.addEventListener('change',()=>{unitBoxes.forEach(box=>{box.checked=allCb.checked;});});
+            unitBoxes.forEach(box=>{
+                box.addEventListener('change',()=>{allCb.checked=unitBoxes.length>0 && unitBoxes.every(item=>item.checked);});
+            });
+            allCb.checked=true;
+            unitBoxes.forEach(box=>{box.checked=true;});
+            document.getElementById('modal-absent-units').classList.remove('hidden');
+        } catch(error) {
+            console.error('Absent List Error:', error);
+            document.getElementById('records-list').innerHTML='<p style="color: var(--danger-color); font-size: 0.9rem;">❌ Failed to prepare absentee list. Please try again.</p>';
+        }
+    }
+    async function submitAbsentUnitsSelection() {
+        if(!isAdmin)return;
+        const selected=[...document.querySelectorAll('#absent-unit-options input[name="absent-unit"]:checked')].map(cb=>cb.value);
+        if(!selected.length) {alert('Please select at least one unit.');return;}
+        closeAbsentUnitsModal();
+        const container=document.getElementById('records-list');
+        container.innerHTML='<p style="color: var(--text-muted); font-size: 0.9rem;">⏳ Scanning absentee records for selected units...</p>';
+        try {
+            await refreshPolicyData();
+            const states=statesForPolicy();
+            const selectedStates=states.filter(state=>selected.includes(state.unitId));
+            const unitStats=selectedStates.map(state=>{
+                const absentees=[];
+                studentDirectory.forEach(student=>{
+                    const entries=absenceEntries(student,[state],unitRecords,examStarts).filter(entry=>entry.status==='pending');
+                    if(entries.length) absentees.push({name:student.name,hr:student.hr});
+                });
+                absentees.sort((a,b)=>a.hr.localeCompare(b.hr,undefined,{numeric:true,sensitivity:'base'}) || a.name.localeCompare(b.name,undefined,{sensitivity:'base'}));
+                return {
+                    unitId:state.unitId,
+                    label:unitLabel(state.book,state.unit),
+                    date:originalExamDate(state) || '',
+                    count:absentees.length,
+                    absentees
+                };
+            }).sort((a,b)=>a.label.localeCompare(b.label,undefined,{numeric:true}));
+
             const studentAbsentMap={};
             studentDirectory.forEach(student=>{
-                const entries=absenceEntries(student,states,unitRecords,examStarts).filter(entry=>entry.status==='pending');
+                const entries=absenceEntries(student,selectedStates,unitRecords,examStarts).filter(entry=>entry.status==='pending');
                 if(entries.length) studentAbsentMap[`${student.hr}__${normalizeLoginValue(student.name)}`]={
                     name:student.name,hr:student.hr,
-                    dates:entries.sort((a,b)=>a.date.localeCompare(b.date)).map(entry=>`${entry.date} · ${unitLabel(entry.book,entry.unit)}`)
+                    dates:entries.sort((a,b)=>a.date.localeCompare(b.date)).map(entry=>`${entry.date} · ${unitLabel(entry.book,entry.unit)}`),
+                    unitLabels:entries.map(entry=>unitLabel(entry.book,entry.unit))
                 };
             });
-            let absentList = Object.values(studentAbsentMap).map(student => {
-                return {
-                    name: student.name,
-                    hr: student.hr,
-                    dates: student.dates,
-                    count: student.dates.length
-                };
-            }).filter(item => item.count > 0)
-              .sort((a, b) =>
+            const absentList=Object.values(studentAbsentMap).map(student=>({
+                name:student.name,
+                hr:student.hr,
+                dates:student.dates,
+                unitLabels:student.unitLabels,
+                count:student.dates.length
+            })).filter(item=>item.count>0)
+              .sort((a,b)=>
                   a.hr.localeCompare(b.hr, undefined, { numeric: true, sensitivity: 'base' }) ||
                   a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
               );
 
-            renderAbsentStudentsUI(absentList, examDates.length);
-        } catch (error) {
-            console.error("Absent List Error:", error);
-            container.innerHTML = '<p style="color: var(--danger-color); font-size: 0.9rem;">❌ Failed to load absentee list. Please try again.</p>';
+            renderAbsentStudentsUI(absentList, unitStats);
+        } catch(error) {
+            console.error('Absent List Error:', error);
+            container.innerHTML='<p style="color: var(--danger-color); font-size: 0.9rem;">❌ Failed to load absentee list. Please try again.</p>';
         }
     }
+    window.submitAbsentUnitsSelection=submitAbsentUnitsSelection;
 
-    function renderAbsentStudentsUI(absentList, totalExamsCount) {
+    function renderAbsentStudentsUI(absentList, unitStats) {
         const container = document.getElementById('records-list');
+        const totalExamsCount = Array.isArray(unitStats) ? unitStats.length : 0;
+        const exportPayload = {
+            title: 'Absent List',
+            generatedAt: new Date().toISOString(),
+            unitStats: (unitStats || []).map(u => ({
+                unit: u.label,
+                date: u.date,
+                absentCount: u.count,
+                students: (u.absentees || []).map(s => ({hr: s.hr, name: s.name}))
+            })),
+            totalPerStudent: (absentList || []).map(row => ({
+                hr: row.hr,
+                name: row.name,
+                absentUnits: row.count,
+                details: (row.dates || []).join('; ')
+            }))
+        };
+        const exportAttr = encodeURIComponent(JSON.stringify(exportPayload));
 
         let tableHtml = `
             <div style="background:#fff; padding:16px; border-radius:10px; border:1px solid #e2e8f0; text-align:center;">
-                <div class="report-heading"><h3 style="color:var(--purple-color); margin-bottom:12px; font-size:1.15rem;">⛔ Absent List (Total Exams: ${totalExamsCount})</h3><button class="print-report-button" aria-label="Print Absent List as PDF" title="Print / Save as PDF" onclick="printTrackReport('Absent List')">🖨️</button></div>
+                <div class="report-heading"><h3 style="color:var(--purple-color); margin-bottom:12px; font-size:1.15rem;">⛔ Absent List (Selected Units: ${totalExamsCount})</h3>
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <button class="print-report-button" aria-label="Print Absent List as PDF" title="Print / Save as PDF" onclick="printTrackReport('Absent List')">🖨️</button>
+                    <button class="print-report-button" style="color:#15803d;" title="Download Excel" aria-label="Download Absent List as Excel" data-absent="${exportAttr}" onclick="exportAbsentListExcel(this)">▦<span style="font-size:.7rem;display:block;">Excel</span></button>
+                </div></div>
+        `;
+
+        // Per-unit absence counts
+        tableHtml += `
+            <div style="text-align:left;margin:8px 0 20px;">
+                <h4 style="color:#6b21a8;margin:0 0 10px;font-size:1.05rem;">📊 Absences by Unit</h4>
+                <table style="width:100%; border-collapse:collapse; text-align:center; font-size:0.95rem;">
+                    <thead>
+                        <tr style="background:#f3e8ff; border-bottom:2px solid #d8b4fe; color:#6b21a8;">
+                            <th style="padding:10px; text-align:left;">Unit</th>
+                            <th style="padding:10px;">Exam Date</th>
+                            <th style="padding:10px;">Absent Students</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        `;
+        if (!unitStats || unitStats.length === 0) {
+            tableHtml += `<tr><td colspan="3" style="padding:16px; color:#16a34a; font-weight:700;">No selected units.</td></tr>`;
+        } else {
+            unitStats.forEach((u, idx) => {
+                const detailId = `absent-unit-detail-${idx}`;
+                const studentChips = (u.absentees || []).map(s =>
+                    `<div style="display:inline-block; padding:4px 10px; background:#fff; border:1px solid #e9d5ff; border-radius:6px; margin:3px; font-size:0.85rem; color:#6b21a8; font-weight:600;">${s.hr} ${studentDisplayHTML(s.name,s.hr)}</div>`
+                ).join('');
+                tableHtml += `
+                    <tr style="border-bottom:1px solid #e2e8f0;">
+                        <td style="padding:12px; text-align:left; font-weight:700;">${u.label}</td>
+                        <td style="padding:12px;">${u.date || '—'}</td>
+                        <td style="padding:12px; font-weight:800; color:var(--purple-color);">
+                            ${u.count}
+                            ${u.count ? `<button class="btn btn-inline btn-secondary" style="margin-left:8px;" onclick="toggleDetails('${detailId}')">🔍 View</button>` : ''}
+                        </td>
+                    </tr>
+                    <tr id="${detailId}" class="hidden" style="background:#faf5ff;">
+                        <td colspan="3" style="padding:12px; text-align:left;">
+                            <div style="font-weight:700; color:#6b21a8; margin-bottom:8px;">Absent students:</div>
+                            ${studentChips || '<span style="color:#16a34a;">None</span>'}
+                        </td>
+                    </tr>
+                `;
+            });
+        }
+        tableHtml += `</tbody></table></div>`;
+
+        // Total Absent Units per Student
+        tableHtml += `
+            <div style="text-align:left;margin:8px 0 8px;">
+                <h4 style="color:#6b21a8;margin:0 0 10px;font-size:1.05rem;">👤 Total Absent Units per Student</h4>
                 <table style="width:100%; border-collapse:collapse; text-align:center; font-size:0.95rem;">
                     <thead>
                         <tr style="background:#f3e8ff; border-bottom:2px solid #d8b4fe; color:#6b21a8;">
@@ -2150,8 +2369,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                     <tbody>
         `;
 
-        if (absentList.length === 0) {
-            tableHtml += `<tr><td colspan="3" style="padding:16px; color:#16a34a; font-weight:700;">No pending absences were found for exams whose scheduled end time has passed.</td></tr>`;
+        if (!absentList || absentList.length === 0) {
+            tableHtml += `<tr><td colspan="3" style="padding:16px; color:#16a34a; font-weight:700;">No pending absences were found for the selected units.</td></tr>`;
         } else {
             const classCounts = absentList.reduce((counts, row) => {
                 counts[row.hr] = (counts[row.hr] || 0) + 1;
@@ -2169,8 +2388,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                     displayedClass = row.hr;
                 }
                 const detailId = `absent-detail-${idx}`;
-                
-                let detailsListHtml = row.dates.map(d => `
+                let detailsListHtml = (row.dates || []).map(d => `
                     <div style="display:inline-block; padding:6px 12px; background:#fff; border:1px solid #e9d5ff; border-radius:6px; margin:4px; font-size:0.88rem; color:#6b21a8; font-weight:600;">
                         📅 ${d}
                     </div>
@@ -2204,9 +2422,49 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             });
         }
 
-        tableHtml += `</tbody></table></div>`;
+        tableHtml += `</tbody></table></div></div>`;
         container.innerHTML = tableHtml;
     }
+
+    async function exportAbsentListExcel(button) {
+        if(!isAdmin || button.disabled) return;
+        button.disabled=true;
+        try {
+            const data=JSON.parse(decodeURIComponent(button.dataset.absent));
+            const library=await loadExcelExportLibrary();
+            const workbook=new library.Workbook();
+            workbook.creator='LUYA';
+            const unitSheet=workbook.addWorksheet('By Unit');
+            unitSheet.addRow(['Unit','Exam Date','Absent Count','Absent Students (HR Name)']);
+            (data.unitStats || []).forEach(u=>{
+                const names=(u.students || []).map(s=>`${s.hr} ${s.name}`).join('; ');
+                unitSheet.addRow([u.unit, u.date || '', u.absentCount, names]);
+            });
+            unitSheet.getRow(1).font={bold:true};
+            unitSheet.columns=[{width:18},{width:14},{width:14},{width:50}];
+
+            const studentSheet=workbook.addWorksheet('Total per Student');
+            studentSheet.addRow(['Homeroom','Student Name','Absent Units','Details']);
+            (data.totalPerStudent || []).forEach(row=>{
+                studentSheet.addRow([row.hr, row.name, row.absentUnits, row.details || '']);
+            });
+            studentSheet.getRow(1).font={bold:true};
+            studentSheet.columns=[{width:12},{width:22},{width:14},{width:55}];
+
+            const buffer=await workbook.xlsx.writeBuffer();
+            const url=URL.createObjectURL(new Blob([buffer],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));
+            const link=document.createElement('a');
+            const stamp=new Date().toISOString().slice(0,10);
+            link.href=url;link.download=`Absent_List_${stamp}.xlsx`;
+            document.body.appendChild(link);link.click();link.remove();
+            setTimeout(()=>URL.revokeObjectURL(url),30000);
+        } catch(error) {
+            alert(`Excel export failed: ${error.message}`);
+        } finally {
+            button.disabled=false;
+        }
+    }
+    window.exportAbsentListExcel=exportAbsentListExcel;
 
     /* Score History Functions */
     function populateHistoryClassOptions() {
@@ -2373,7 +2631,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
 
                 return `
                     <div class="student-record-item">
-                        <p>Submission reason: ${submissionReasonLabel(rec.submissionReason)}</p>
+                        <p>Submission reason: ${submissionReasonLabel(rec.submissionReason, attemptDurationMinutes(rec))}</p>
                         <div class="record-summary">
                             <span style="font-size: 1.1rem; font-weight: 700; color: var(--text-main);">📅 Date: ${rec.date}</span>
                             <span>${recordLabel(rec)} · Exam date: ${rec.date}<br>Initial Score: <strong style="color: var(--primary-color); font-size: 1.1rem;">${rec.score} / ${rec.totalPossible}</strong> 
@@ -2637,7 +2895,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         document.getElementById('result-student-name').innerText = `Student: ${studentDisplayName(studentRecord.studentName,studentRecord.studentHR,studentRecord.c_name)} (${studentRecord.date}) · ${recordLabel(studentRecord)}`;
         document.getElementById('final-score').innerText = `Initial Score: ${studentRecord.score} / ${studentRecord.totalPossible} Points`;
 
-        let resultListHtml = `<p>Submission reason: ${submissionReasonLabel(studentRecord.submissionReason)}</p>`;
+        let resultListHtml = `<p>Submission reason: ${submissionReasonLabel(studentRecord.submissionReason, attemptDurationMinutes(studentRecord))}</p>`;
         (studentRecord.details || []).forEach(d => {
             resultListHtml += `
                 <div class="result-card ${d.isCorrect ? 'correct' : 'incorrect'}">
@@ -2944,10 +3202,11 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     }
 
 
-    const EXAM_DURATION_MS=30*60*1000;
     let examCountdownInterval;
-    function submissionReasonLabel(reason) {
-        return ({manual:'Manual submission',time_limit:'Automatic submission: time limit (30 minutes)',fullscreen_exit:'Automatic submission: fullscreen/window departure limit reached'})[reason] || 'Not recorded';
+    function submissionReasonLabel(reason, minutes) {
+        const mins=Number(minutes);
+        const limitText=Number.isFinite(mins) && mins>0 ? `${mins} minutes` : 'time limit';
+        return ({manual:'Manual submission',time_limit:`Automatic submission: time limit (${limitText})`,fullscreen_exit:'Automatic submission: fullscreen/window departure limit reached'})[reason] || 'Not recorded';
     }
     function stopExamCountdown() {
         clearInterval(examCountdownInterval);
@@ -2955,7 +3214,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         document.getElementById('exam-countdown').classList.add('hidden');
     }
     function examDeadline() {
-        return Date.parse(activeRecord?.startedAt)+EXAM_DURATION_MS;
+        return attemptDeadline(activeRecord || {});
     }
     function tickExamCountdown() {
         if(!isExamActive || isCorrectionMode || savingResult) return;
@@ -3326,7 +3585,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             </span>
         `;
 
-        let resultListHtml = `<p>Submission reason: ${submissionReasonLabel(studentRecord.submissionReason)}</p>`;
+        let resultListHtml = `<p>Submission reason: ${submissionReasonLabel(studentRecord.submissionReason, attemptDurationMinutes(studentRecord))}</p>`;
         (studentRecord.details || []).forEach(d => {
             resultListHtml += `
                 <div class="result-card ${d.isCorrect ? 'correct' : 'incorrect'}">
