@@ -2016,9 +2016,10 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             if(!records.length && expiredOwnAttempt(book,unit)) {alert('Time limit reached. No submitted answers are available on the server. Please contact Administrator.');return;}
             if(!records.length && !canEnterUnit(book,unit)) return;
             if(records.length && !pending) {viewPreviousResults(records[0]);return;}
+            const durationMins=(()=>{const m=Number(unitStates[key]?.examDurationMinutes);return Number.isFinite(m)&&m>0?m:15;})();
             const accepted=await confirmDatabaseWarning(pending
                 ? `${unitLabel(book,unit)}\n\nReady to correct your mistakes?\nPress OK to begin, or Cancel to return to the menu.`
-                : `${unitLabel(book,unit)}\n\nYou have 30 minutes. At the deadline, your exam is automatically submitted and answered questions are graded. The first two fullscreen/window departures trigger warnings. A third departure automatically submits your exam; answered questions are graded. Ready to take the test?\nPress OK to begin, or Cancel to return to the menu.`,
+                : `${unitLabel(book,unit)}\n\nYou have ${durationMins} minutes. At the deadline, your exam is automatically submitted and answered questions are graded. The first two fullscreen/window departures trigger warnings. A third departure automatically submits your exam; answered questions are graded. Ready to take the test?\nPress OK to begin, or Cancel to return to the menu.`,
                 pending ? '✍️ Correct Mistakes' : '📚 Start Exam');
             if(!accepted || isAdmin) return;
             if(!pending && !canEnterUnit(book,unit)) {
@@ -3477,7 +3478,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         examGuard.episode=false;
         if(isCorrectionMode) return;
         if(locked) {retryLockedSubmission();return;}
-        guardMessage('You must stay in fullscreen mode and keep the exam window active throughout the exam. Switching tabs or windows, clicking outside the exam window, or exiting fullscreen counts as a violation.\n\nThe first two violations will each trigger a warning. A third violation will immediately submit your exam. At 30 minutes, your exam is also automatically submitted. In both cases, answered questions are graded normally; unanswered questions receive 0 points.\n\nClick “Enter Fullscreen” to start or continue.');
+        const limitMins=attemptDurationMinutes(activeRecord||{});
+        guardMessage(`You must stay in fullscreen mode and keep the exam window active throughout the exam. Switching tabs or windows, clicking outside the exam window, or exiting fullscreen counts as a violation.\n\nThe first two violations will each trigger a warning. A third violation will immediately submit your exam. At ${limitMins} minutes, your exam is also automatically submitted. In both cases, answered questions are graded normally; unanswered questions receive 0 points.\n\nClick “Enter Fullscreen” to start or continue.`);
         // A simulated click cannot restore user activation after loading or code verification.
         // Keep the instructions visible and wait for a real click in that case.
         if(fullscreenElement() || (typeof navigator!=='undefined' && navigator.userActivation?.isActive)) guardButton.click();
