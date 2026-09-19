@@ -2301,6 +2301,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     function renderAbsentStudentsUI(absentList, unitStats) {
         const container = document.getElementById('records-list');
         const totalExamsCount = Array.isArray(unitStats) ? unitStats.length : 0;
+        const formatAbsentStudent = (s) => `${s.hr} ${studentDisplayName(s.name, s.hr)}`.trim();
         const exportPayload = {
             title: 'Absent List',
             generatedAt: new Date().toISOString(),
@@ -2308,7 +2309,11 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 unit: u.label,
                 date: u.date,
                 absentCount: u.count,
-                students: (u.absentees || []).map(s => ({hr: s.hr, name: s.name}))
+                students: (u.absentees || []).map(s => ({
+                    hr: s.hr,
+                    name: s.name,
+                    label: formatAbsentStudent(s)
+                }))
             })),
             totalPerStudent: (absentList || []).map(row => ({
                 hr: row.hr,
@@ -2323,8 +2328,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             <div style="background:#fff; padding:16px; border-radius:10px; border:1px solid #e2e8f0; text-align:center;">
                 <div class="report-heading"><h3 style="color:var(--purple-color); margin-bottom:12px; font-size:1.15rem;">⛔ Absent List (Selected Units: ${totalExamsCount})</h3>
                 <div style="display:flex;gap:8px;align-items:center;">
-                    <button class="print-report-button" aria-label="Print Absent List as PDF" title="Print / Save as PDF" onclick="printTrackReport('Absent List')">🖨️</button>
                     <button class="print-report-button" style="color:#15803d;" title="Download Excel" aria-label="Download Absent List as Excel" data-absent="${exportAttr}" onclick="exportAbsentListExcel(this)">▦<span style="font-size:.7rem;display:block;">Excel</span></button>
+                    <button class="print-report-button" aria-label="Print Absent List as PDF" title="Print / Save as PDF" onclick="printTrackReport('Absent List')">🖨️</button>
                 </div></div>
         `;
 
@@ -2447,26 +2452,39 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         button.disabled=true;
         try {
             const data=JSON.parse(decodeURIComponent(button.dataset.absent));
+            const units=data.unitStats || [];
+            if(!units.length) {alert('No absence data to export.');return;}
             const library=await loadExcelExportLibrary();
             const workbook=new library.Workbook();
             workbook.creator='LUYA';
-            const unitSheet=workbook.addWorksheet('By Unit');
-            unitSheet.addRow(['Unit','Exam Date','Absent Count','Absent Students (HR Name)']);
-            (data.unitStats || []).forEach(u=>{
-                const names=(u.students || []).map(s=>`${s.hr} ${s.name}`).join('; ');
-                unitSheet.addRow([u.unit, u.date || '', u.absentCount, names]);
+            const sheet=workbook.addWorksheet('Absent List');
+            // Header: one column per unit (Book5 / Unit01, ...)
+            sheet.addRow(units.map(u=>u.unit));
+            sheet.getRow(1).font={name:'Arial',size:11,bold:true};
+            sheet.getRow(1).alignment={horizontal:'center',vertical:'middle',wrapText:true};
+            const maxRows=Math.max(0, ...units.map(u=>(u.students || []).length));
+            for(let i=0;i<maxRows;i++) {
+                const row=units.map(u=>{
+                    const student=(u.students || [])[i];
+                    if(!student) return '';
+                    return student.label || `${student.hr} ${student.name}`.trim();
+                });
+                sheet.addRow(row);
+            }
+            sheet.eachRow((row, rowNumber)=>{
+                row.height=rowNumber===1 ? 28 : 20;
+                for(let col=1;col<=units.length;col++) {
+                    const cell=row.getCell(col);
+                    cell.font={name:'Arial',size:10,bold:rowNumber===1};
+                    cell.alignment={horizontal:'left',vertical:'middle',wrapText:true};
+                    const edge={style:'thin',color:{argb:'FF000000'}};
+                    cell.border={top:edge,bottom:edge,left:edge,right:edge};
+                }
             });
-            unitSheet.getRow(1).font={bold:true};
-            unitSheet.columns=[{width:18},{width:14},{width:14},{width:50}];
-
-            const studentSheet=workbook.addWorksheet('Total per Student');
-            studentSheet.addRow(['Homeroom','Student Name','Absent Units','Details']);
-            (data.totalPerStudent || []).forEach(row=>{
-                studentSheet.addRow([row.hr, row.name, row.absentUnits, row.details || '']);
+            units.forEach((_, index)=>{
+                sheet.getColumn(index+1).width=28;
             });
-            studentSheet.getRow(1).font={bold:true};
-            studentSheet.columns=[{width:12},{width:22},{width:14},{width:55}];
-
+            sheet.views=[{state:'frozen',ySplit:1}];
             const buffer=await workbook.xlsx.writeBuffer();
             const url=URL.createObjectURL(new Blob([buffer],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));
             const link=document.createElement('a');
