@@ -2374,11 +2374,15 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 if (!(u.absentees || []).length) {
                     tableHtml += `<tr><td style="padding:12px; color:#16a34a; font-weight:700; text-align:left;">No absences for this unit.</td></tr>`;
                 } else {
+                    const unitClassCounts = (u.absentees || []).reduce((counts, s) => {
+                        counts[s.hr] = (counts[s.hr] || 0) + 1;
+                        return counts;
+                    }, {});
                     let displayedClass = '';
-                    (u.absentees || []).forEach(s => {
+                    (u.absentees || []).forEach((s, sIdx) => {
                         if (s.hr !== displayedClass) {
                             tableHtml += `
-                                <tr style="background:linear-gradient(135deg, #3b82f6, #60a5fa);">
+                                <tr style="background:linear-gradient(135deg, #16a34a, #4ade80);">
                                     <td style="padding:8px 12px; text-align:left; font-weight:800; color:#ffffff;">Homeroom ${s.hr}</td>
                                 </tr>
                             `;
@@ -2389,6 +2393,14 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                                 <td style="padding:10px 12px; text-align:left; font-weight:700;">👤 <span style="color:#16a34a;">${s.hr}</span> <span style="color:#0f172a;">${studentDisplayHTML(s.name,s.hr)}</span></td>
                             </tr>
                         `;
+                        const next = (u.absentees || [])[sIdx + 1];
+                        if (!next || next.hr !== s.hr) {
+                            tableHtml += `
+                                <tr style="background:#dcfce7; border-bottom:2px solid #86efac;">
+                                    <td style="padding:8px 12px; text-align:left; font-weight:800; color:#166534;"><span style="color:#16a34a;">${s.hr}</span> Absent: ${unitClassCounts[s.hr]}</td>
+                                </tr>
+                            `;
+                        }
                     });
                 }
                 tableHtml += `</tbody></table></div></div>`;
