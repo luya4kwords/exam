@@ -1768,6 +1768,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 const prior=snap.data();
                 if(prior.hasParticipation) throw new Error('This unit can no longer be turned off because a student has started the exam.');
                 const state={...prior,book,unit,isOpen:false,generateMakeupCode:false,allowNoCodeMakeup:false,
+                    scheduleEnabled:false,startsAt:null,endsAt:null,startMs:null,endMs:null,
+                    openedDate:null,makeupSessionId:null,
                     updatedAt:new Date().toISOString()};
                 transaction.set(unitRef,state);
                 return state;
