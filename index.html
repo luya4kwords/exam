@@ -644,6 +644,7 @@
             <input type="text" id="input-username" class="input-text" placeholder="e.g., Peter Pan (Full English Name)" onkeypress="if(event.key==='Enter') verifyLogin()" onfocus="resetLoginInput()">
         </div>
         <div class="login-actions">
+        <button type="button" id="btn-admin-login" class="btn btn-inline btn-secondary" onclick="loginGoogleAdmin()">Administrator / Google</button>
         <button id="btn-login" class="btn btn-inline" onclick="verifyLogin()" disabled>Login</button>
         </div>
         <p id="admin-login-message" class="status-msg" aria-live="polite"></p>
@@ -871,7 +872,7 @@
 <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
     import { getAuth, signInAnonymously, GoogleAuthProvider, signInWithPopup, signOut, setPersistence, browserSessionPersistence } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
-    import { getFirestore, runTransaction as firestoreTransaction, doc, setDoc as firestoreSetDoc, getDoc, getDocFromServer, collection, query, where, getDocs, getDocsFromServer, writeBatch as firestoreBatch, deleteField } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+    import { getFirestore, runTransaction as firestoreTransaction, doc, setDoc as firestoreSetDoc, getDoc, getDocFromServer, collection, query, where, getDocs, getDocsFromServer, writeBatch as firestoreBatch, deleteField, serverTimestamp, Timestamp, GeoPoint } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
 
     const firebaseConfig = {
         apiKey: "AIzaSyAbpAnc5Ub9mGGm5kUgP3jCKXwAnZONwrE",
@@ -892,7 +893,7 @@
     function invalidateReads() {readCache.clear();}
     async function cachedRead(key,fetcher,force=false) {
         const old=readCache.get(key);
-        if(old && (old.pending || (!force && Date.now()-old.time<READ_CACHE_MS)))return old.promise;
+        if(old && !force && (old.pending || Date.now()-old.time<READ_CACHE_MS))return old.promise;
         const entry={pending:true,time:0};
         entry.promise=Promise.resolve().then(fetcher).then(value=>{entry.pending=false;entry.time=Date.now();return value;},error=>{if(readCache.get(key)===entry)readCache.delete(key);throw error;});
         readCache.set(key,entry);return entry.promise;
@@ -928,7 +929,7 @@
     const authReady = setPersistence(auth, browserSessionPersistence);
     authReady.catch(error => console.error('Authentication initialization:', error));
     async function loginGoogleAdmin() {
-        const button=document.getElementById('btn-login');
+        const button=document.getElementById('btn-admin-login');
         const message=document.getElementById('admin-login-message');
         if(button.disabled) return;
         button.disabled=true;
@@ -969,22 +970,51 @@
         return typeof globalThis.structuredClone==='function' ? globalThis.structuredClone(value) : JSON.parse(JSON.stringify(value));
     }
     async function saveResultToCloud(dateStr, studentName, recordData) {
-        if(recordData.uid && recordData.startedAt && !isCorrectionMode) {
-            return runTransaction(db,async transaction=>{
-                const ref=doc(db,'records',recordData.recordId);
-                const existing=await transaction.get(ref);
-                if(existing.exists()) return {...existing.data(),recordId:recordData.recordId};
-                const saved=cloneExamData(recordData);
-                if(Date.now()>=attemptDeadline(saved) && saved.submissionReason!=='fullscreen_exit') finalizeAutomaticSubmission(saved,'time_limit');
-                saved.status='completed';
-                transaction.set(ref,saved);
-                transaction.update(doc(db,'examStarts',recordData.recordId),{status:'completed'});
-                return saved;
-            });
-        }
-        await setDoc(doc(db, "records", recordData.recordId), recordData);
-        return recordData;
+        await assertTestingAvailable();
+        if(draftFlight)await draftFlight;
+        if(!isCorrectionMode && draftBlocked)throw Error('Draft changed in another window. Reload before submitting.');
+        return runTransaction(db,async transaction=>{
+            const ref=doc(db,'records',recordData.recordId);
+            const existing=await transaction.get(ref);
+            if(isCorrectionMode) {
+                if(!existing.exists())throw Error('The result was removed. Reload before correcting.');
+                const latest=existing.data(),saved=cloneExamData(latest);
+                const changes=[];
+                for(const q of questions) {
+                    const before=correctionBase.details.find(d=>d.id===q.id);
+                    const now=saved.details.find(d=>d.id===q.id);
+                    const proposed=recordData.details.find(d=>d.id===q.id);
+                    if(!before || !now || !proposed || now.stem!==before.stem || now.correctAns!==before.correctAns)throw Error('The question version changed. Reload before correcting.');
+                    if(now.isCorrect)continue; // A completed correction cannot be regressed.
+                    if(canonicalJSON(now)!==canonicalJSON(before) && canonicalJSON(now)!==canonicalJSON(proposed))throw Error('This question was corrected in another window. Reload to merge the latest answers.');
+                    changes.push({id:q.id,userAns:proposed.userAns,isCorrect:proposed.isCorrect,isCorrected:proposed.isCorrect===true});
+                }
+                saved.details=saved.details.map(d=>({...d,...(changes.find(c=>c.id===d.id)||{})}));
+                saved.correctedAt=recordData.correctedAt;
+                transaction.update(ref,{details:saved.details,correctedAt:saved.correctedAt});
+                return {...saved,recordId:recordData.recordId};
+            }
+            if(existing.exists() && !existing.data().answerDataUnavailable)return {...existing.data(),recordId:recordData.recordId};
+            const startRef=doc(db,'examStarts',recordData.recordId);
+            const start=await transaction.get(startRef);
+            if(!start.exists())throw Error('The original attempt was removed. Ask your teacher before retrying.');
+            const a=start.data();
+            const draft=await transaction.get(doc(db,'attemptDrafts',recordData.recordId));
+            if(draft.exists() && (Number(draft.data().revision)||0)!==draftRevision)throw Error('A newer draft exists in another window. Reload before submitting.');
+            if(!sameStudent(a,currentStudent()))throw Error('Student name does not match the original attempt.');
+            const saved=cloneExamData(recordData);
+            // The immutable admission owns these fields, including its original anonymous UID.
+            for(const key of ['uid','startedAt','unitId','book','unit','studentName','studentHR','isMakeup'])if(a[key]!==undefined)saved[key]=a[key];
+            saved.examDurationMinutes=attemptDurationMinutes(a);
+            if(a.serverStartedAt)saved.serverStartedAt=a.serverStartedAt;
+            if(Date.now()>=attemptDeadline(saved) && saved.submissionReason!=='fullscreen_exit')finalizeAutomaticSubmission(saved,'time_limit');
+            saved.status='completed';saved.answerDataUnavailable=false;
+            transaction.set(ref,saved);
+            transaction.update(startRef,{status:'completed'});
+            return saved;
+        });
     }
+
     async function getResultsFromCloud(unitId,force=false) {
         const snapshot=await unitDocuments('records',unitId,force);
         return snapshot.docs.map(d=>({...d.data(),recordId:d.id}))
@@ -1093,12 +1123,12 @@
             if(isExamActive) saveCurrentAnswer();
             const screen=savingResult || isExamActive ? 'screen-exam' :
                 ['screen-login','screen-admin','screen-student-select','screen-result'].find(id=>!document.getElementById(id).classList.contains('hidden'));
+            if(isExamActive && !isCorrectionMode)persistLocalDraft();
             sessionStorage.setItem(SESSION_KEY,JSON.stringify({currentUser,currentUserHR,isAdmin,
                 selectedBook,selectedUnit,screen,scrollY:window.scrollY,
                 questions,sectionDefs,currentIndex,userAnswers,isCorrectionMode,activeRecord,activeUnit,
                 examGuardCount:examGuard.count,examGuardLocked:examGuard.locked,
-                recordsHTML:isAdmin ? document.getElementById('records-list').innerHTML : '',
-                resultHTML:screen==='screen-result' ? document.getElementById('screen-result').innerHTML : ''}));
+                savedAt:Date.now()}));
         } catch(error) {console.error('Unable to preserve page:',error);}
     }
     window.addEventListener('beforeunload',savePageSession);
@@ -1115,7 +1145,10 @@
     }
     window.returnToMenu=returnToMenu;
     async function logoutUser() {
-        if(isExamActive && !confirm('Leave this exam and discard the saved answers?')) return;
+        if(savingResult)return;
+        if(isExamActive && !confirm('Leave this exam? Saved answers will be retained; the timer will continue.'))return;
+        saveCurrentAnswer();savePageSession();
+        if(isExamActive && !isCorrectionMode)await flushDraft();
         leavingSession=true;
         try { await signOut(auth); } catch(error) {leavingSession=false;alert('Unable to sign out. Please try again.');return;}
         sessionStorage.removeItem(SESSION_KEY);
@@ -1135,6 +1168,7 @@
             } else {
                 if(!studentDirectory.some(s=>s.hr===saved.currentUserHR && s.name===saved.currentUser)) return;
             }
+            if(!saved.isAdmin) {await ensureStudentSession();await bindStudentName(saved.currentUser,saved.currentUserHR);}
             currentUser=saved.currentUser;currentUserHR=saved.currentUserHR;isAdmin=saved.isAdmin===true;
             selectedBook=saved.selectedBook;selectedUnit=saved.selectedUnit;
             document.getElementById('user-display').classList.remove('hidden');
@@ -1146,27 +1180,36 @@
             for(const id of ['screen-login','screen-admin','screen-student-select','screen-exam','screen-result'])
                 document.getElementById(id).classList.toggle('hidden',id!==screen);
             const refresh=renderUnits();
-            if(isAdmin) document.getElementById('records-list').innerHTML=saved.recordsHTML || '';
-            if(screen==='screen-result') {
-                document.getElementById('screen-result').innerHTML=saved.resultHTML || '';
-                const returnButton=document.querySelector('#screen-result > button:last-child');
-                if(returnButton) {returnButton.textContent='Return to Menu';returnButton.setAttribute('onclick','returnToMenu()');}
+            if(isAdmin) document.getElementById('records-list').textContent='Select a report to load current data.';
+            if(screen==='screen-result' && saved.activeRecord?.recordId) {
+                const result=await getDocFromServer(doc(db,'records',saved.activeRecord.recordId));
+                if(result.exists())viewPreviousResults({...result.data(),recordId:result.id});
+                else showScreen(isAdmin?'screen-admin':'screen-student-select');
             }
             if(screen==='screen-exam') {
-                if(!saved.isCorrectionMode && saved.activeRecord?.recordId) {
-                    const existing=await getDocFromServer(doc(db,'records',saved.activeRecord.recordId));
-                    if(existing.exists()) {isExamActive=false;viewPreviousResults(existing.data());return;}
+                await refresh;
+                if(!saved.isCorrectionMode) {
+                    if(!saved.activeRecord?.book || !saved.activeRecord?.unit)throw Error('Saved exam is incomplete.');
+                    selectedBook=saved.activeRecord.book;selectedUnit=saved.activeRecord.unit;
+                    showScreen('screen-student-select');
+                    restoringPage=false;
+                    await startStudentExam(false);
+                } else {
+                    const result=await getDocFromServer(doc(db,'records',saved.activeRecord.recordId));
+                    if(!result.exists())throw Error('Correction record no longer exists.');
+                    selectedBook=saved.activeRecord.book;selectedUnit=saved.activeRecord.unit;
+                    showScreen('screen-student-select');restoringPage=false;
+                    await startStudentExam(true,{...result.data(),recordId:result.id});
+                    for(const q of questions)if(saved.userAnswers?.[q.id]!==undefined)userAnswers[q.id]=saved.userAnswers[q.id];
+                    currentIndex=Math.min(saved.currentIndex||0,Math.max(0,questions.length-1));
+                    if(isExamActive)renderQuestion();
                 }
-                questions=saved.questions || [];sectionDefs=saved.sectionDefs || {};currentIndex=saved.currentIndex || 0;
-                userAnswers=saved.userAnswers || {};isCorrectionMode=saved.isCorrectionMode===true;
-                activeRecord=saved.activeRecord;activeUnit=saved.activeUnit;
-                isExamActive=true;
-                if(questions.length) {renderQuestion(); prepareExamGuard(saved.examGuardCount || 0, saved.examGuardLocked===true); startExamCountdown();}
             }
+
             requestAnimationFrame(()=>window.scrollTo(0,saved.scrollY || 0));
             await refresh;
             requestAnimationFrame(()=>window.scrollTo(0,saved.scrollY || 0));
-        } catch(error) {console.error('Page restore failed:',error);}
+        } catch(error) {console.error('Page restore failed:',error);isExamActive=false;showScreen(currentUser ? (isAdmin?'screen-admin':'screen-student-select'):'screen-login');alert('Session could not be restored. Your saved draft is retained. '+error.message);}
         finally {restoringPage=false;}
     }
 
@@ -1177,27 +1220,12 @@
         }
     }
 
-    function getFormattedDate(d = new Date()) {
-        let year = d.getFullYear();
-        let month = String(d.getMonth() + 1).padStart(2, '0');
-        let day = String(d.getDate()).padStart(2, '0');
-        return `${year}-${month}-${day}`;
-    }
+    function getFormattedDate(d = new Date()) {return taiwanDateTime(d).slice(0,10);}
 
     function getWeekRange(targetDateStr) {
-        const parts = targetDateStr.split('-').map(Number);
-        const dateObj = new Date(parts[0], parts[1] - 1, parts[2]);
-        const day = dateObj.getDay(); 
-        const diffToMon = dateObj.getDate() - (day === 0 ? 6 : day - 1);
-
-        const monday = new Date(parts[0], parts[1] - 1, diffToMon);
-        const sunday = new Date(monday);
-        sunday.setDate(monday.getDate() + 6);
-
-        return {
-            startStr: getFormattedDate(monday),
-            endStr: getFormattedDate(sunday)
-        };
+        const day=new Date(targetDateStr+'T00:00:00.000Z');
+        const monday=new Date(day.getTime()-((day.getUTCDay()+6)%7)*86400000);
+        return {startStr:monday.toISOString().slice(0,10),endStr:new Date(monday.getTime()+6*86400000).toISOString().slice(0,10)};
     }
 
     async function verifyLogin() {
@@ -1210,6 +1238,7 @@
             return;
         }
 
+        if (normalizeLoginValue(inputVal) === 'administrator') {await loginGoogleAdmin();return;}
         if (!studentDirectoryLoaded) {
             inputEl.value = '';
             inputEl.placeholder = 'Student list is still loading';
@@ -1232,7 +1261,7 @@
         );
 
         if (matchedStudent) {
-            try {await ensureStudentSession();} catch(error) {alert('Unable to sign in. Ask Administrator to enable Firebase Anonymous authentication.');return;}
+            try {await ensureStudentSession();await bindStudentName(matchedStudent.name,matchedStudent.hr);} catch(error) {alert('Unable to open your student session. Check the connection and updated Firestore rules.');return;}
             isAdmin = false;
             currentUser = matchedStudent.name;
             currentUserHR = matchedStudent.hr;
@@ -1268,7 +1297,7 @@
         else if(/Windows/.test(ua)) operatingSystem='Windows';
         else if(/Macintosh|Mac OS X/.test(ua)) operatingSystem='macOS';
         else if(/Linux/.test(ua)) operatingSystem='Linux';
-        return {browserName,browserVersion,operatingSystem,userAgent:ua,appVersion:'2026-09-16-auto-submit-scoring-1',capturedAt:new Date().toISOString()};
+        return {browserName,browserVersion,operatingSystem,userAgent:ua,appVersion:'2026-09-19-reliability-2',capturedAt:new Date().toISOString()};
     }
 
     let unitStates = {}, unitRecords = [], activeRecord = null, activeUnit = null;
@@ -1334,7 +1363,7 @@ function examWindow(state) {
 function examPhase(state, now=Date.now()) {
     const window=examWindow(state);
     if(!window) return 'unconfigured';
-    if(state.isOpen!==true) return 'closed';
+    if(state.isOpen!==true || state.scheduleEnabled!==true) return 'closed';
     if(now<window.start) return 'scheduled';
     return now<window.end ? 'active' : 'closed';
 }
@@ -1419,7 +1448,11 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         const mins=Number(attempt?.examDurationMinutes);
         return Number.isFinite(mins) && mins>0 ? mins : 30;
     }
-    function attemptDeadline(attempt) {return Date.parse(attempt.startedAt)+attemptDurationMinutes(attempt)*60*1000;}
+    function attemptDeadline(attempt) {
+        const t=attempt?.serverStartedAt;
+        const start=t && Number.isFinite(t.seconds) ? t.seconds*1000+(t.nanoseconds||0)/1000000 : Date.parse(attempt?.startedAt);
+        return start+attemptDurationMinutes(attempt)*60000;
+    }
     function finalizeAutomaticSubmission(record,reason='time_limit') {
         record.score=(record.details || []).reduce((sum,d)=>sum+(Number(d.earnedPoints)||0),0);
         record.forfeited=false;record.submissionReason=reason;
@@ -1434,51 +1467,15 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         // Preserve earned points and answers for both automatic submission reasons.
         return record;
     }
-    let finalizingExpired=false;
     async function finalizeExpiredAttempts(unitId=null) {
-        // Existing rules allow only Administrator to close another student's attempt.
-        if(!isAdmin || finalizingExpired) return;
-        finalizingExpired=true;
-        const exams=new Map();
-        let failures=0;
-        try {
-            for(const attempt of examStarts.filter(a=>(!unitId || unitKey(a.book,a.unit)===unitId) && a.status==='in_progress' && Date.now()>=attemptDeadline(a))) {
-                const id=attempt.recordId || attempt.id;
-                try {
-                    // Check for a submitted result before loading a possibly changed question file.
-                    const known=await getDocFromServer(doc(db,'records',id));
-                    if(known.exists()) {attempt.status='completed';continue;}
-                    let snapshot=attempt.questionSnapshot;
-                    if(!Array.isArray(snapshot) || !snapshot.length) {
-                        const key=unitKey(attempt.book,attempt.unit);
-                        if(!exams.has(key))exams.set(key,await loadUnitExam(attempt.book,attempt.unit));
-                        snapshot=exams.get(key).questions;
-                    }
-                    const saved=await runTransaction(db,async transaction=>{
-                        const ref=doc(db,'records',id),startRef=doc(db,'examStarts',id);
-                        const [record,start]=await Promise.all([transaction.get(ref),transaction.get(startRef)]);
-                        if(record.exists())return {...record.data(),recordId:id};
-                        if(!start.exists() || start.data().status!=='in_progress' || Date.now()<attemptDeadline(start.data()))return null;
-                        const a=start.data();
-                        const result={...a,recordId:id,c_name:a.c_name || studentDirectory.find(s=>s.name===a.studentName && s.hr===a.studentHR)?.c_name || '',
-                            totalPossible:snapshot.reduce((sum,q)=>sum+q.points,0),
-                            details:snapshot.map(q=>({id:q.id,stem:q.stem,correctAns:q.answer,userAns:'No Answer',isCorrect:false,points:q.points,earnedPoints:0}))};
-                        delete result.questionSnapshot;
-                        result.answerDataUnavailable=true;
-                        finalizeAutomaticSubmission(result);
-                        transaction.set(ref,result);transaction.update(startRef,{status:'completed'});
-                        return result;
-                    });
-                    if(saved) {attempt.status='completed';unitRecords=unitRecords.filter(r=>r.recordId!==id);unitRecords.push(saved);}
-                } catch(error) {
-                    failures++;
-                    console.error('Unable to finalize expired attempt:',id,error);
-                    document.getElementById('admin-sync-status').textContent='Some expired exams could not be finalized. Check the connection and Unit question files, then reopen this page.';
-                }
-            }
-        } finally {finalizingExpired=false;}
-        if(failures)throw new Error(`${failures} expired exam(s) could not be finalized. Check the connection and Unit question files.`);
+        // A missing submission is not evidence that every answer was blank.
+        // Never let opening an admin report create an irreversible zero score.
+        if(!isAdmin)return;
+        const pending=examStarts.filter(a=>(!unitId || unitKey(a.book,a.unit)===unitId) && a.status==='in_progress' && Date.now()>=attemptDeadline(a));
+        document.getElementById('admin-sync-status').textContent=pending.length
+            ? `${pending.length} expired attempt(s) await submission. Students can reopen the unit to submit saved answers. No automatic zero scores were created.` : '';
     }
+
     function expiredOwnAttempt(book,unit) {
         return examStarts.find(a=>Number(a.book)===Number(book) && Number(a.unit)===Number(unit) && sameStudent(a,currentStudent()) && Date.now()>=attemptDeadline(a));
     }
@@ -1545,8 +1542,9 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         await ensureStudentSession();
         await refreshPolicyData(true);
         const state=policyState(book,unit), student=currentStudent();
-        if(unitRecords.some(r=>sameExam(r,state) && sameStudent(r,student))) throw new Error('You have already completed this exam. Please use corrections or view your result.');
-        if(expiredOwnAttempt(book,unit)) throw new Error('The 30-minute limit has passed. This attempt is scored 0 and cannot be restarted. Administrator will record the result when opening the system.');
+        if(unitRecords.some(r=>sameExam(r,state) && sameStudent(r,student) && !r.answerDataUnavailable)) throw new Error('You have already completed this exam. Please use corrections or view your result.');
+        const known=examStarts.find(a=>sameExam(a,state) && sameStudent(a,student));
+        if(known) return {...known,recordId:known.recordId||known.id,resuming:true};
         const regular=examPhase(state)==='active' && eligibleStudent(state,student);
         const missed=absenceEntries(student,[state],unitRecords,examStarts).some(e=>e.status==='pending');
         let host=null;
@@ -1575,7 +1573,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         const ref=doc(db,'examStarts',attemptId), unitRef=doc(db,'examUnits',unitKey(book,unit));
         const result=await runTransaction(db,async transaction=>{
             const [existing,latest]=await Promise.all([transaction.get(ref),transaction.get(unitRef)]);
-            if(existing.exists()) throw new Error('This exam has already been started. Resume it in the original browser, or ask your teacher for help.');
+            if(existing.exists()) return {...existing.data(),recordId:attemptId,resuming:true};
             const fresh={...latest.data(),unitId:unitKey(book,unit)};
             if(!host && (examPhase(fresh)!=='active' || !eligibleStudent(fresh,student))) throw new Error('The exam entry time has ended.');
             if(host && (fresh.isOpen!==true || !examWindow(fresh) || Date.now()<examWindow(fresh).end))
@@ -1583,17 +1581,21 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             const now=new Date().toISOString();
             const durationMins=Number(fresh.examDurationMinutes);
             const attempt={book,unit,unitId:unitKey(book,unit),studentName:currentUser,studentHR:currentUserHR,
-                uid:auth.currentUser.uid,startedAt:now,status:'in_progress',isMakeup:!!host,
+                uid:auth.currentUser.uid,startedAt:now,startedAtMs:Date.parse(now),serverStartedAt:serverTimestamp(),status:'in_progress',isMakeup:!!host,
                 examDurationMinutes:Number.isFinite(durationMins) && durationMins>0 ? durationMins : 15,
                 clientInfo:collectExamClientInfo(),
                 originalExamDate:originalExamDate(fresh),hostId:host?.unitId || '',recordId:attemptId,
-                questionSnapshot:exam.questions.map(q=>({id:q.id,stem:q.stem,answer:q.answer,points:q.points,type:q.type}))};
+                schemaVersion:2,sectionDefs:exam.sectionDefs,questionSnapshot:cloneExamData(exam.questions)};
             transaction.set(ref,attempt);
+            transaction.set(doc(db,'attemptDrafts',attemptId),{recordId:attemptId,startedAt:now,studentName:currentUser,studentHR:currentUserHR,answers:{},currentIndex:0,departureCount:0,locked:false,submissionReason:'',updatedMs:Date.now(),revision:1});
             if(!fresh.hasParticipation) transaction.update(unitRef,{hasParticipation:true,participationId:attemptId});
             return attempt;
         });
-        examStarts.push({...result,id:attemptId});
-        return result;
+        // Resolve the server timestamp sentinel before serializing a local draft.
+        const committed=await getDocFromServer(ref);
+        const resolved={...committed.data(),recordId:attemptId,resuming:result.resuming===true};
+        examStarts=examStarts.filter(a=>(a.recordId||a.id)!==attemptId);examStarts.push({...resolved,id:attemptId});
+        return resolved;
     }
     let makeupDraft=null, makeupPreviewVersion=0;
     // A draft belongs only to the current editor session. Invalidate pending reads too.
@@ -1843,6 +1845,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         const parsed = parseExamData(XLSX.utils.sheet_to_json(sheet, {defval:''}));
         if (!parsed.questions.length || parsed.questions.some(q => !q.stem || !q.answer || !Number.isFinite(q.points) || q.points < 0) || !parsed.questions.some(q => q.points > 0))
             throw new Error(`${filename}: no valid exam; check question, answer and points`);
+        validateExamQuestions(parsed.questions,filename);
         return parsed;
     }
     async function renderUnits(force=false) {
@@ -1852,7 +1855,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         try {
             await refreshPolicyData(force);
             drawUnits();if(!isAdmin)checkStudentUnitExam();
-            notice.textContent=isAdmin ? '' : 'Updated '+new Date().toLocaleTimeString()+'. Use Refresh for the latest status.';
+            if(!isAdmin)notice.textContent='Updated '+new Date().toLocaleTimeString()+'. Use Refresh for the latest status.';
         } catch(error) {
             notice.textContent='Unable to refresh: '+error.message+'. Please try Refresh again later.';
         }
@@ -2012,17 +2015,17 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             selectedBook=book;selectedUnit=unit;
             const records=unitRecords.filter(r=>(r.unitId===key || (Number(r.book)===book && Number(r.unit)===unit)) && isMine(r))
                 .sort((a,b)=>recordTime(b).localeCompare(recordTime(a)));
-            const pending=records.find(r=>recordDetails(r).some(d=>!d.isCorrect));
-            if(!records.length && expiredOwnAttempt(book,unit)) {alert('Time limit reached. No submitted answers are available on the server. Please contact Administrator.');return;}
-            if(!records.length && !canEnterUnit(book,unit)) return;
-            if(records.length && !pending) {viewPreviousResults(records[0]);return;}
+            const pending=records.find(r=>!r.answerDataUnavailable && recordDetails(r).some(d=>!d.isCorrect));
+            const resumable=examStarts.some(a=>sameExam(a,{book,unit,unitId:key})&&sameStudent(a,currentStudent()));
+            if(!records.length && !resumable && !canEnterUnit(book,unit))return;
+            if(records.length && !pending && !records[0].answerDataUnavailable) {viewPreviousResults(records[0]);return;}
             const durationMins=(()=>{const m=Number(unitStates[key]?.examDurationMinutes);return Number.isFinite(m)&&m>0?m:15;})();
             const accepted=await confirmDatabaseWarning(pending
                 ? `${unitLabel(book,unit)}\n\nReady to correct your mistakes?\nPress OK to begin, or Cancel to return to the menu.`
                 : `${unitLabel(book,unit)}\n\nYou have ${durationMins} minutes. At the deadline, your exam is automatically submitted and answered questions are graded. The first two fullscreen/window departures trigger warnings. A third departure automatically submits your exam; answered questions are graded. Ready to take the test?\nPress OK to begin, or Cancel to return to the menu.`,
                 pending ? '✍️ Correct Mistakes' : '📚 Start Exam');
             if(!accepted || isAdmin) return;
-            if(!pending && !canEnterUnit(book,unit)) {
+            if(!pending && !resumable && !canEnterUnit(book,unit)) {
                 alert('The exam entry time has ended or availability has changed. Please ask your teacher about a make-up exam.');
                 return;
             }
@@ -2037,12 +2040,13 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         button.classList.add('hidden');
         if(!unitStatesLoaded || !unitRecordsLoaded) {msg.textContent='Book catalogue ready. Waiting for cloud status / exam records; reload if synchronization fails.';return;}
         const records=unitRecords.filter(r => (r.unitId===key || (r.book===selectedBook && r.unit===selectedUnit)) && isMine(r)).sort((a,b)=>recordTime(b).localeCompare(recordTime(a)));
-        const pending=records.find(r=>recordDetails(r).some(d=>!d.isCorrect));
-        const record=pending || records[0];
-        if(!record && expiredOwnAttempt(selectedBook,selectedUnit)) {
-            msg.textContent='Time limit reached. No submitted answers are available on the server. Please contact Administrator.';
-            return;
+        const pending=records.find(r=>!r.answerDataUnavailable && recordDetails(r).some(d=>!d.isCorrect));
+        const record=pending || records.find(r=>!r.answerDataUnavailable);
+        if(!record && examStarts.some(a=>sameExam(a,{unitId:key,book:selectedBook,unit:selectedUnit})&&sameStudent(a,currentStudent()))) {
+            msg.textContent='An existing attempt is available. Reopen it to continue or submit saved answers.';
+            button.textContent='Resume / Submit Saved Exam';button.onclick=()=>startStudentExam(false);button.classList.remove('hidden');return;
         }
+
         if(!record && !canEnterUnit(selectedBook,selectedUnit)) {msg.textContent=classCanAccess(state,currentUserHR) && state?.scheduleEnabled ? scheduleLabel(state) : 'Please select a unit to take the test.';return;}
         document.getElementById('student-selected-unit').textContent=unitLabel(selectedBook,selectedUnit);
         msg.textContent=record ? `Initial Score: ${record.score}/${record.totalPossible} · Exam date: ${record.date}` : '✅ This unit is ready for your exam.';
@@ -2059,8 +2063,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             return;
         }
         const targetUnit = unitKey(selectedBook,selectedUnit);
-        const container = document.getElementById('records-list');
-        const heading = `<div class="report-heading unit-records-heading"><h3 style="color:var(--primary-color);margin:16px 0;">📚 ${unitLabel(selectedBook,selectedUnit)} · Unit Records</h3>${reportPrintButton()}<button class="btn btn-inline btn-blue-grad unit-records-refresh" onclick="loadAdminStudentRecords(true)">Refresh</button></div>`;
+        const container = reportSurface();
+        let heading = `<div class="report-heading unit-records-heading"><h3 style="color:var(--primary-color);margin:16px 0;">📚 ${unitLabel(selectedBook,selectedUnit)} · Unit Records</h3>${reportPrintButton()}<button class="btn btn-inline btn-blue-grad unit-records-refresh" onclick="loadAdminStudentRecords(true)">Refresh</button></div>`;
         container.innerHTML = heading + '<p style="color: var(--text-muted); font-size: 0.9rem;">⏳ Loading Cloud Records...</p>';
 
         let records,recordUnitState;
@@ -2072,6 +2076,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             recordUnitState=unitSnapshot.exists() ? unitSnapshot.data() : {};
         } catch(error) { container.textContent="❌ Unable to load records."; return; }
         if(targetUnit !== unitKey(selectedBook,selectedUnit)) return;
+        const pendingAttempts=examStarts.filter(a=>unitKey(a.book,a.unit)===targetUnit && a.status==='in_progress' && Date.now()>=attemptDeadline(a) && !records.some(r=>r.recordId===(a.recordId||a.id)));
+        if(pendingAttempts.length)heading+='<div class="card-box"><strong>Expired — awaiting saved answers</strong><ul>'+pendingAttempts.map(a=>'<li>'+escapeHTML(a.studentHR)+' '+studentDisplayHTML(a.studentName,a.studentHR)+' — '+escapeHTML(taiwanDateTime(attemptDeadline(a)).replace('T',' '))+'</li>').join('')+'</ul><p>Ask these students to reopen the unit and submit their saved answers. No zero scores have been assumed.</p></div>';
         const eligibleClasses=recordUnitState.examClasses || recordUnitState.allowedClasses || [];
         const classAttempts=new Map(eligibleClasses.map(hr=>[String(hr).trim(),0]).filter(([hr])=>hr));
         for(const rec of records || []) {
@@ -2112,20 +2118,20 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             let detailsHtml = recordDetails(rec).map(d => `
                 <div class="result-card ${d.isCorrect ? 'correct' : 'incorrect'}" style="margin-top: 6px; font-size: 0.85rem;">
                     <div class="res-header">
-                        <span>Q${d.id}. ${d.stem} ${d.isCorrected ? '<span class="badge-corrected">Corrected</span>' : ''}</span>
+                        <span>Q${escapeHTML(d.id)}. ${escapeHTML(d.stem)} ${d.isCorrected ? '<span class="badge-corrected">Corrected</span>' : ''}</span>
                         <span class="${d.isCorrect ? 'tag-correct' : 'tag-incorrect'}">
-                            ${d.isCorrect ? '✓ Correct' : '✗ Incorrect'} (${d.isCorrect ? d.points : 0}/${d.points} Pts)
+                            ${d.isCorrect ? '✓ Correct' : '✗ Incorrect'} (${escapeHTML(d.isCorrect ? d.points : 0)}/${escapeHTML(d.points)} Pts)
                         </span>
                     </div>
-                    <div>Student Answer: <strong>${d.userAns}</strong> | Correct Answer: <strong>${d.correctAns}</strong></div>
+                    <div>Student Answer: <strong>${escapeHTML(d.userAns)}</strong> | Correct Answer: <strong>${escapeHTML(d.correctAns)}</strong></div>
                 </div>
             `).join('');
 
             recEl.innerHTML = `
                 <p>Submission reason: ${submissionReasonLabel(rec.submissionReason, attemptDurationMinutes(rec))}</p>
                 <div class="record-summary">
-                    <span style="font-size:1rem; font-weight:700;">👤 <span style="color:#16a34a;">${getStudentHR(rec.studentName, rec.studentHR)}</span> <span style="color:#0f172a;">${studentDisplayHTML(rec.studentName,rec.studentHR,rec.c_name)}</span></span>
-                    <span>${recordLabel(rec)} · Exam date: ${rec.date}<br>Initial Score: <strong style="color: var(--primary-color); font-size: 1.1rem;">${rec.score} / ${rec.totalPossible}</strong> ${isPerfectScore ? '<span style="color:var(--success-color); font-size:0.85rem; font-weight:700;">(Perfect Score)</span>' : isFullyCorrected ? '<span style="color:var(--success-color); font-size:0.85rem; font-weight:700;">(Correction Complete)</span>' : '<span style="color:var(--danger-color); font-size:0.85rem; font-weight:700;">(Needs Correction)</span>'}</span>
+                    <span style="font-size:1rem; font-weight:700;">👤 <span style="color:#16a34a;">${escapeHTML(getStudentHR(rec.studentName, rec.studentHR))}</span> <span style="color:#0f172a;">${studentDisplayHTML(rec.studentName,rec.studentHR,rec.c_name)}</span></span>
+                    <span>${escapeHTML(recordLabel(rec))} · Exam date: ${escapeHTML(rec.date)}<br>Initial Score: <strong style="color: var(--primary-color); font-size: 1.1rem;">${escapeHTML(rec.score)} / ${escapeHTML(rec.totalPossible)}</strong> ${isPerfectScore ? '<span style="color:var(--success-color); font-size:0.85rem; font-weight:700;">(Perfect Score)</span>' : isFullyCorrected ? '<span style="color:var(--success-color); font-size:0.85rem; font-weight:700;">(Correction Complete)</span>' : '<span style="color:var(--danger-color); font-size:0.85rem; font-weight:700;">(Needs Correction)</span>'}</span>
                     <button class="btn btn-inline btn-secondary" onclick="toggleDetails('rec-detail-${idx}')">Details</button>
                 </div>
                 <div id="rec-detail-${idx}" class="hidden" style="margin-top: 10px;">
@@ -2139,7 +2145,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
 
     async function calculateUncorrectedStudents() {
         if(!isAdmin)return;
-        const container = document.getElementById('records-list');
+        const container = reportSurface();
         container.innerHTML = '<p style="color: var(--text-muted); font-size: 0.9rem;">⏳ Scanning all student correction records...</p>';
 
         try {
@@ -2184,15 +2190,14 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
             );
 
-            renderUncorrectedStudentsUI(uncorrectedList);
+            renderUncorrectedStudentsUI(uncorrectedList,container);
         } catch (error) {
             console.error("Uncorrected List Error:", error);
             container.innerHTML = '<p style="color: var(--danger-color); font-size: 0.9rem;">❌ Failed to load uncorrected list. Please try again.</p>';
         }
     }
 
-    function renderUncorrectedStudentsUI(uncorrectedList) {
-        const container = document.getElementById('records-list');
+    function renderUncorrectedStudentsUI(uncorrectedList,container=document.getElementById('records-list')) {
 
         let tableHtml = `
             <div style="background:#fff; padding:16px; border-radius:10px; border:1px solid #e2e8f0; text-align:center;">
@@ -2221,7 +2226,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 if (row.hr !== displayedClass) {
                     tableHtml += `
                         <tr style="background:linear-gradient(135deg, #2563eb, #3b82f6); border-top:2px solid #2563eb; box-shadow:inset 0 1px 0 rgba(255,255,255,0.45);">
-                            <td colspan="3" style="padding:10px 12px; text-align:left; font-weight:800; color:#ffffff; text-shadow:0 1px 1px rgba(30,64,175,0.25);">Homeroom ${row.hr}</td>
+                            <td colspan="3" style="padding:10px 12px; text-align:left; font-weight:800; color:#ffffff; text-shadow:0 1px 1px rgba(30,64,175,0.25);">Homeroom ${escapeHTML(row.hr)}</td>
                         </tr>
                     `;
                     displayedClass = row.hr;
@@ -2230,16 +2235,16 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 
                 let detailsListHtml = row.records.map(r => `
                     <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:#fff; border:1px solid #fee2e2; border-radius:6px; margin-bottom:6px; font-size:0.88rem;">
-                        <span>📅 Exam Date: <strong style="color:#0f172a;">${r.date} · ${r.label || ""}</strong></span>
-                        <span style="color:var(--danger-color); font-weight:700;">❌ ${r.wrongCount} question(s) remaining (Total: ${r.totalQuestions})</span>
+                        <span>📅 Exam Date: <strong style="color:#0f172a;">${escapeHTML(r.date)} · ${escapeHTML(r.label || "")}</strong></span>
+                        <span style="color:var(--danger-color); font-weight:700;">❌ ${escapeHTML(r.wrongCount)} question(s) remaining (Total: ${escapeHTML(r.totalQuestions)})</span>
                     </div>
                 `).join('');
 
                 tableHtml += `
                     <tr style="border-bottom:1px solid #e2e8f0;">
-                        <td style="padding:12px; text-align:left; font-size:1rem; font-weight:700;">👤 <span style="color:#16a34a;">${row.hr}</span> <span style="color:#0f172a;">${studentDisplayHTML(row.name,row.hr)}</span></td>
+                        <td style="padding:12px; text-align:left; font-size:1rem; font-weight:700;">👤 <span style="color:#16a34a;">${escapeHTML(row.hr)}</span> <span style="color:#0f172a;">${studentDisplayHTML(row.name,row.hr)}</span></td>
                         <td style="padding:12px; font-weight:800; color:var(--danger-color); font-size:1.05rem;">
-                            ${row.count} Unit(s)
+                            ${escapeHTML(row.count)} Unit(s)
                         </td>
                         <td style="padding:12px;">
                             <button class="btn btn-inline btn-secondary" onclick="toggleDetails('${detailId}')">🔍 View Details</button>
@@ -2256,7 +2261,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 if (!uncorrectedList[idx + 1] || uncorrectedList[idx + 1].hr !== row.hr) {
                     tableHtml += `
                         <tr style="background:#fef2f2; border-bottom:2px solid #fecaca;">
-                            <td colspan="3" style="padding:10px 12px; text-align:left; font-weight:800; color:#991b1b;"><span style="color:#16a34a;">${row.hr}</span> Pending Correction: ${classCounts[row.hr]}</td>
+                            <td colspan="3" style="padding:10px 12px; text-align:left; font-weight:800; color:#991b1b;"><span style="color:#16a34a;">${escapeHTML(row.hr)}</span> Pending Correction: ${classCounts[row.hr]}</td>
                         </tr>
                     `;
                 }
@@ -2327,7 +2332,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         if(!selected.length) {alert('Please select at least one unit.');return;}
         const includeTotalPerStudent=!!document.getElementById('absent-include-total')?.checked;
         closeAbsentUnitsModal();
-        const container=document.getElementById('records-list');
+        const container=reportSurface();
         container.innerHTML='<p style="color: var(--text-muted); font-size: 0.9rem;">⏳ Scanning absentee records for selected units...</p>';
         try {
             await refreshPolicyData();
@@ -2370,7 +2375,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                   a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
               );
 
-            renderAbsentStudentsUI(absentList, unitStats, includeTotalPerStudent);
+            renderAbsentStudentsUI(absentList, unitStats, includeTotalPerStudent,container);
         } catch(error) {
             console.error('Absent List Error:', error);
             container.innerHTML='<p style="color: var(--danger-color); font-size: 0.9rem;">❌ Failed to load absentee list. Please try again.</p>';
@@ -2378,8 +2383,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     }
     window.submitAbsentUnitsSelection=submitAbsentUnitsSelection;
 
-    function renderAbsentStudentsUI(absentList, unitStats, includeTotalPerStudent=false) {
-        const container = document.getElementById('records-list');
+    function renderAbsentStudentsUI(absentList, unitStats, includeTotalPerStudent=false,container=document.getElementById('records-list')) {
         const totalExamsCount = Array.isArray(unitStats) ? unitStats.length : 0;
         const formatAbsentStudent = (s) => `${s.hr} ${studentDisplayName(s.name, s.hr)}`.trim();
         const exportPayload = {
@@ -2428,8 +2432,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 tableHtml += `
                     <div style="margin-bottom:16px;border:1px solid #e9d5ff;border-radius:10px;overflow:hidden;">
                         <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 14px;background:#f3e8ff;">
-                            <div style="font-weight:800;color:#6b21a8;">${u.label} <span style="font-weight:600;color:#64748b;font-size:0.9rem;">(${u.date || '—'})</span></div>
-                            <div style="font-weight:800;color:var(--purple-color);">${u.count} student(s)
+                            <div style="font-weight:800;color:#6b21a8;">${escapeHTML(u.label)} <span style="font-weight:600;color:#64748b;font-size:0.9rem;">(${escapeHTML(u.date || '—')})</span></div>
+                            <div style="font-weight:800;color:var(--purple-color);">${escapeHTML(u.count)} student(s)
                                 <button class="btn btn-inline btn-secondary" style="margin-left:8px;" onclick="toggleDetails('${detailId}')">🔍 View</button>
                             </div>
                         </div>
@@ -2454,21 +2458,21 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                         if (s.hr !== displayedClass) {
                             tableHtml += `
                                 <tr style="background:linear-gradient(135deg, #059669, #10b981);">
-                                    <td style="padding:8px 12px; text-align:left; font-weight:800; color:#ffffff;">Homeroom ${s.hr}</td>
+                                    <td style="padding:8px 12px; text-align:left; font-weight:800; color:#ffffff;">Homeroom ${escapeHTML(s.hr)}</td>
                                 </tr>
                             `;
                             displayedClass = s.hr;
                         }
                         tableHtml += `
                             <tr style="border-bottom:1px solid #e2e8f0;">
-                                <td style="padding:10px 12px; text-align:left; font-weight:700;">👤 <span style="color:#16a34a;">${s.hr}</span> <span style="color:#0f172a;">${studentDisplayHTML(s.name,s.hr)}</span></td>
+                                <td style="padding:10px 12px; text-align:left; font-weight:700;">👤 <span style="color:#16a34a;">${escapeHTML(s.hr)}</span> <span style="color:#0f172a;">${studentDisplayHTML(s.name,s.hr)}</span></td>
                             </tr>
                         `;
                         const next = (u.absentees || [])[sIdx + 1];
                         if (!next || next.hr !== s.hr) {
                             tableHtml += `
                                 <tr style="background:#ecfdf5; border-bottom:2px solid #6ee7b7;">
-                                    <td style="padding:8px 12px; text-align:left; font-weight:800; color:#047857;"><span style="color:#059669;">${s.hr}</span> Absent: ${unitClassCounts[s.hr]}</td>
+                                    <td style="padding:8px 12px; text-align:left; font-weight:800; color:#047857;"><span style="color:#059669;">${escapeHTML(s.hr)}</span> Absent: ${unitClassCounts[s.hr]}</td>
                                 </tr>
                             `;
                         }
@@ -2508,7 +2512,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                     if (row.hr !== displayedClass) {
                         tableHtml += `
                             <tr style="background:linear-gradient(135deg, #2563eb, #3b82f6); border-top:2px solid #2563eb; box-shadow:inset 0 1px 0 rgba(255,255,255,0.45);">
-                                <td colspan="3" style="padding:10px 12px; text-align:left; font-weight:800; color:#ffffff; text-shadow:0 1px 1px rgba(30,64,175,0.25);">Homeroom ${row.hr}</td>
+                                <td colspan="3" style="padding:10px 12px; text-align:left; font-weight:800; color:#ffffff; text-shadow:0 1px 1px rgba(30,64,175,0.25);">Homeroom ${escapeHTML(row.hr)}</td>
                             </tr>
                         `;
                         displayedClass = row.hr;
@@ -2516,15 +2520,15 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                     const detailId = `absent-detail-${idx}`;
                     let detailsListHtml = (row.dates || []).map(d => `
                         <div style="display:inline-block; padding:6px 12px; background:#fff; border:1px solid #e9d5ff; border-radius:6px; margin:4px; font-size:0.88rem; color:#6b21a8; font-weight:600;">
-                            📅 ${d}
+                            📅 ${escapeHTML(d)}
                         </div>
                     `).join('');
 
                     tableHtml += `
                         <tr style="border-bottom:1px solid #e2e8f0;">
-                            <td style="padding:12px; text-align:left; font-size:1rem; font-weight:700;">👤 <span style="color:#16a34a;">${row.hr}</span> <span style="color:#0f172a;">${studentDisplayHTML(row.name,row.hr)}</span></td>
+                            <td style="padding:12px; text-align:left; font-size:1rem; font-weight:700;">👤 <span style="color:#16a34a;">${escapeHTML(row.hr)}</span> <span style="color:#0f172a;">${studentDisplayHTML(row.name,row.hr)}</span></td>
                             <td style="padding:12px; font-weight:800; color:var(--purple-color); font-size:1.05rem;">
-                                ${row.count} Unit(s)
+                                ${escapeHTML(row.count)} Unit(s)
                             </td>
                             <td style="padding:12px;">
                                 <button class="btn btn-inline btn-secondary" onclick="toggleDetails('${detailId}')">🔍 View Absent Units</button>
@@ -2541,7 +2545,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                     if (!absentList[idx + 1] || absentList[idx + 1].hr !== row.hr) {
                         tableHtml += `
                             <tr style="background:#f3e8ff; border-bottom:2px solid #d8b4fe;">
-                                <td colspan="3" style="padding:10px 12px; text-align:left; font-weight:800; color:#6b21a8;"><span style="color:#16a34a;">${row.hr}</span> Absent: ${classCounts[row.hr]}</td>
+                                <td colspan="3" style="padding:10px 12px; text-align:left; font-weight:800; color:#6b21a8;"><span style="color:#16a34a;">${escapeHTML(row.hr)}</span> Absent: ${classCounts[row.hr]}</td>
                             </tr>
                         `;
                     }
@@ -2727,15 +2731,15 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
 
     async function fetchAndRenderStudentHistory(searchName, startStr, endStr, selectedClass) {
         if(!isAdmin)return;
-        const container = document.getElementById('records-list');
-        container.innerHTML = `<p style="color: var(--text-muted); font-size: 0.9rem;">⏳ Searching score history for "${selectedClass} ${studentDisplayHTML(searchName,selectedClass)}" (${startStr} ~ ${endStr})...</p>`;
+        const container = reportSurface();
+        container.innerHTML = `<p style="color: var(--text-muted); font-size: 0.9rem;">⏳ Searching score history for "${escapeHTML(selectedClass)} ${studentDisplayHTML(searchName,selectedClass)}" (${startStr} ~ ${endStr})...</p>`;
 
         try {
             const querySnapshot = await cachedCollection('records');
             const normalizedSearch = normalizeLoginValue(searchName);
 
             let matchedRecords = [];
-            let displayStudentName = `${selectedClass} ${studentDisplayHTML(searchName,selectedClass)}`;
+            let displayStudentName = `${escapeHTML(selectedClass)} ${studentDisplayHTML(searchName,selectedClass)}`;
 
             querySnapshot.forEach((doc) => {
                 const data = doc.data();
@@ -2744,7 +2748,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                     const recordClass = getStudentHR(data.studentName, data.studentHR);
                     if (normDocName === normalizedSearch && recordClass === selectedClass && data.date >= startStr && data.date <= endStr) {
                         matchedRecords.push(data);
-                        displayStudentName = `${selectedClass} ${studentDisplayHTML(data.studentName,selectedClass,data.c_name)}`;
+                        displayStudentName = `${escapeHTML(selectedClass)} ${studentDisplayHTML(data.studentName,selectedClass,data.c_name)}`;
                     }
                 }
             });
@@ -2757,7 +2761,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                         <div class="report-heading"><h3 style="color:var(--text-muted); font-size:1.1rem;">👤 ${displayStudentName} - Score History</h3>${reportPrintButton()}</div>
                         <p>No exam records found</p>
                         <p style="color:var(--text-muted); font-size:0.9rem; margin-top:6px;">
-                            No matching records for "<strong>${searchName}</strong>" between <strong>${startStr}</strong> and <strong>${endStr}</strong>.
+                            No matching records for "<strong>${escapeHTML(searchName)}</strong>" between <strong>${startStr}</strong> and <strong>${endStr}</strong>.
                         </p>
                     </div>
                 `;
@@ -2795,12 +2799,12 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 let detailsHtml = (rec.details || []).map(d => `
                     <div class="result-card ${d.isCorrect ? 'correct' : 'incorrect'}" style="margin-top: 6px; font-size: 0.85rem;">
                         <div class="res-header">
-                            <span>Q${d.id}. ${d.stem} ${d.isCorrected ? '<span class="badge-corrected">Corrected</span>' : ''}</span>
+                            <span>Q${escapeHTML(d.id)}. ${escapeHTML(d.stem)} ${d.isCorrected ? '<span class="badge-corrected">Corrected</span>' : ''}</span>
                             <span class="${d.isCorrect ? 'tag-correct' : 'tag-incorrect'}">
-                                ${d.isCorrect ? '✓ Correct' : '✗ Incorrect'} (${d.isCorrect ? d.points : 0}/${d.points} Pts)
+                                ${d.isCorrect ? '✓ Correct' : '✗ Incorrect'} (${escapeHTML(d.isCorrect ? d.points : 0)}/${escapeHTML(d.points)} Pts)
                             </span>
                         </div>
-                        <div>Student Answer: <strong>${d.userAns}</strong> | Correct Answer: <strong>${d.correctAns}</strong></div>
+                        <div>Student Answer: <strong>${escapeHTML(d.userAns)}</strong> | Correct Answer: <strong>${escapeHTML(d.correctAns)}</strong></div>
                     </div>
                 `).join('');
 
@@ -2808,8 +2812,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                     <div class="student-record-item">
                         <p>Submission reason: ${submissionReasonLabel(rec.submissionReason, attemptDurationMinutes(rec))}</p>
                         <div class="record-summary">
-                            <span style="font-size: 1.1rem; font-weight: 700; color: var(--text-main);">📅 Date: ${rec.date}</span>
-                            <span>${recordLabel(rec)} · Exam date: ${rec.date}<br>Initial Score: <strong style="color: var(--primary-color); font-size: 1.1rem;">${rec.score} / ${rec.totalPossible}</strong> 
+                            <span style="font-size: 1.1rem; font-weight: 700; color: var(--text-main);">📅 Date: ${escapeHTML(rec.date)}</span>
+                            <span>${escapeHTML(recordLabel(rec))} · Exam date: ${escapeHTML(rec.date)}<br>Initial Score: <strong style="color: var(--primary-color); font-size: 1.1rem;">${escapeHTML(rec.score)} / ${escapeHTML(rec.totalPossible)}</strong> 
                                 ${isPerfectScore ? '<span style="color:var(--success-color); font-size:0.85rem; font-weight:700;">(Perfect Score)</span>' : isFullyCorrected ? '<span style="color:var(--success-color); font-size:0.85rem; font-weight:700; margin-left:6px;">(Correction Complete)</span>' : '<span style="color:var(--danger-color); font-size:0.85rem; font-weight:700; margin-left:6px;">(Needs Correction)</span>'}
                             </span>
                             <button class="btn btn-inline btn-secondary" onclick="toggleDetails('history-rec-detail-${idx}')">Details</button>
@@ -2942,7 +2946,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
 
     async function calculateRangeLeaderboard(startStr, endStr, titleText, selectedClasses) {
         if(!isAdmin)return;
-        const container = document.getElementById('records-list');
+        const container = reportSurface();
         container.innerHTML = `<p style="color: var(--text-muted); font-size: 0.9rem;">⏳ Calculating ranking data from ${startStr} to ${endStr}...</p>`;
 
         try {
@@ -2958,7 +2962,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             });
             unitSnapshot.forEach(unitDoc=>{
                 const unit=unitDoc.data();
-                if(unit.book && unit.unit && isDue(unit) && unit.openedDate>=startStr && unit.openedDate<=endStr
+                if(unit.book && unit.unit && unit.isOpen===true && originalExamDate(unit)>=startStr && originalExamDate(unit)<=endStr
                     && selectedClasses.some(hr=>classCanAccess(unit,hr))) rankingUnits.add(unitLabel(unit.book,unit.unit));
             });
 
@@ -3006,15 +3010,14 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 };
             });
 
-            renderRangeLeaderboardUI(startStr, endStr, leaderboard, titleText, [...rankingUnits]);
+            renderRangeLeaderboardUI(startStr, endStr, leaderboard, titleText, [...rankingUnits],container);
         } catch (error) {
             console.error("Leaderboard Error:", error);
             container.innerHTML = '<p style="color: var(--danger-color); font-size: 0.9rem;">❌ Failed to load leaderboard. Please try again.</p>';
         }
     }
 
-    function renderRangeLeaderboardUI(startStr, endStr, leaderboard, titleText, rankingUnits=[]) {
-        const container = document.getElementById('records-list');
+    function renderRangeLeaderboardUI(startStr, endStr, leaderboard, titleText, rankingUnits=[],container=document.getElementById('records-list')) {
         const exportData=encodeURIComponent(JSON.stringify({startStr,endStr,titleText,leaderboard,rankingUnits}));
         
         let tableHtml = `
@@ -3041,11 +3044,11 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 tableHtml += `
                     <tr style="border-bottom:1px solid #e2e8f0;">
                         <td style="padding:12px; font-weight:800; font-size:1.05rem; color:${row.rank <= 3 ? '#d97706' : '#0f172a'};">
-                            ${badge}
+                            ${escapeHTML(badge)}
                         </td>
-                        <td style="padding:12px; text-align:left; font-size:1rem; font-weight:700;"><span style="color:#16a34a;">${row.hr}</span> <span style="color:#0f172a;">${studentDisplayHTML(row.name,row.hr)}</span></td>
-                        <td style="padding:12px;">${row.count} Unit(s)</td>
-                        <td style="padding:12px; font-weight:800; font-size:1.1rem; color:var(--primary-color);">${row.totalScore} Pts</td>
+                        <td style="padding:12px; text-align:left; font-size:1rem; font-weight:700;"><span style="color:#16a34a;">${escapeHTML(row.hr)}</span> <span style="color:#0f172a;">${studentDisplayHTML(row.name,row.hr)}</span></td>
+                        <td style="padding:12px;">${escapeHTML(row.count)} Unit(s)</td>
+                        <td style="padding:12px; font-weight:800; font-size:1.1rem; color:var(--primary-color);">${escapeHTML(row.totalScore)} Pts</td>
                     </tr>
                 `;
             });
@@ -3063,6 +3066,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
 
 
     function viewPreviousResults(studentRecord) {
+        isExamActive=false;stopExamCountdown();stopExamGuard();showScreen('screen-result');activeRecord=studentRecord;
         document.getElementById('screen-student-select').classList.add('hidden');
         document.getElementById('screen-result').classList.remove('hidden');
 
@@ -3075,14 +3079,14 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             resultListHtml += `
                 <div class="result-card ${d.isCorrect ? 'correct' : 'incorrect'}">
                     <div class="res-header">
-                        <span>Question ${d.id} ${d.isCorrected ? '<span class="badge-corrected">Corrected</span>' : ''}</span>
+                        <span>Question ${escapeHTML(d.id)} ${d.isCorrected ? '<span class="badge-corrected">Corrected</span>' : ''}</span>
                         <span class="${d.isCorrect ? 'tag-correct' : 'tag-incorrect'}">
-                            ${d.isCorrect ? '✓ Correct' : '✗ Incorrect'} (${d.isCorrect ? d.points : 0} / ${d.points} pts)
+                            ${d.isCorrect ? '✓ Correct' : '✗ Incorrect'} (${escapeHTML(d.isCorrect ? d.points : 0)} / ${escapeHTML(d.points)} pts)
                         </span>
                     </div>
-                    <div style="margin-bottom: 8px;">${d.stem}</div>
+                    <div style="margin-bottom: 8px;">${escapeHTML(d.stem)}</div>
                     <div style="font-size: 0.95rem; color: var(--text-muted);">
-                        Your Answer: <strong>${d.userAns || 'No Answer'}</strong> | Correct Answer: <strong>${d.correctAns}</strong>
+                        Your Answer: <strong>${escapeHTML(d.userAns || 'No Answer')}</strong> | Correct Answer: <strong>${escapeHTML(d.correctAns)}</strong>
                     </div>
                 </div>
             `;
@@ -3109,26 +3113,49 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             if(isCorrection) {
                 if(!correctionRecord || !isMine(correctionRecord) || !(correctionRecord.unitId===unitKey(book,unit) || (Number(correctionRecord.book)===Number(book) && Number(correctionRecord.unit)===Number(unit)))) throw new Error('Correction record unavailable.');
             }
-            const exam=await loadUnitExam(book,unit);
+            await ensureStudentSession();await assertTestingAvailable();
+            const starts=isCorrection?[]:await studentDocuments('examStarts',currentUser,currentUserHR,true);
+            const known=isCorrection ? null : starts.docs.find(d=>sameExam(d.data(),{book,unit,unitId:unitKey(book,unit)}));
+            if(!isCorrection) {
+                const submitted=await studentDocuments('records',currentUser,currentUserHR,true);
+                const finished=submitted.docs.find(d=>sameExam(d.data(),{book,unit,unitId:unitKey(book,unit)})&&!d.data().answerDataUnavailable);
+                if(finished){viewPreviousResults({...finished.data(),recordId:finished.id});return;}
+            }
+            const snapshot=known?.data();
+            let storedQuestions=isCorrection ? (correctionRecord.questionSnapshot || (correctionRecord.details?.every(d=>d.type) ? correctionRecord.details.map(d=>({...d,answer:d.correctAns})) : null)) : snapshot?.questionSnapshot;
+            if(!isCorrection && snapshot && snapshot.schemaVersion!==2) {
+                const oldSession=JSON.parse(sessionStorage.getItem(SESSION_KEY)||'null');
+                storedQuestions=oldSession?.activeRecord?.recordId===known.id ? oldSession.questions : null;
+            }
+            const exam=Array.isArray(storedQuestions)&&storedQuestions.length ? {questions:storedQuestions,sectionDefs:snapshot?.sectionDefs||correctionRecord?.sectionDefs||{}} : await loadUnitExam(book,unit);
+            validateExamQuestions(exam.questions,'Saved exam');
+            if(!isCorrection && !known)await preflightFullscreen();
             examLoadingMessage('Checking exam access and preparing your attempt. Please wait.');
             const admission=isCorrection ? null : await authorizeExamStart(book,unit,exam);
             if(!isCorrection && !admission) return;
             activeUnit={book,unit,unitId:unitKey(book,unit)};
             activeRecord=isCorrection ? cloneExamData(correctionRecord) : {...admission,recordId:admission.recordId,studentName:currentUser,studentHR:currentUserHR,c_name:studentDirectory.find(s=>s.name===currentUser && s.hr===currentUserHR)?.c_name || '',...activeUnit,date:getFormattedDate(),score:0,totalPossible:0,details:[]};
-            delete activeRecord.questionSnapshot;
+            delete activeRecord.resuming;
+            // Keep the immutable question version for correction and recovery.
+            activeRecord.questionSnapshot=cloneExamData(exam.questions);activeRecord.sectionDefs=cloneExamData(exam.sectionDefs||{});
             if(isCorrection && !activeRecord) throw new Error('Correction record unavailable.');
             currentExamData=exam; sectionDefs=exam.sectionDefs || {}; isCorrectionMode=isCorrection;
             questions=isCorrection ? exam.questions.filter(q=>activeRecord.details.some(d=>d.id===q.id && !d.isCorrect)) : exam.questions;
             if(!questions.length) throw new Error('No questions available.');
             if(isCorrection && activeRecord.details.filter(d=>!d.isCorrect).some(d=>!questions.some(q=>q.id===d.id && q.stem===d.stem && q.answer===d.correctAns))) throw new Error('The question file has changed; contact Administrator before correcting.');
-            currentIndex=0; userAnswers={}; lastSectionType=null; isExamActive=true;
+            currentIndex=0;userAnswers={};draftRevision=0;draftBlocked=false;lastSectionType=null;isExamActive=true;
+            if(!isCorrection)await restoreAttemptDraft(admission.resuming===true);
+            correctionBase=isCorrection?cloneExamData(activeRecord):null;
+            examGuard.count=isCorrection?0:restoredGuardCount;examGuard.locked=isCorrection?false:restoredGuardLocked;
             document.getElementById('screen-student-select').classList.add('hidden');
             document.getElementById('screen-exam').classList.remove('hidden');
             renderQuestion();
             savePageSession();
-            prepareExamGuard();
+            if(!isCorrection && !admission.resuming)await flushDraft();
+            prepareExamGuard(isCorrection?0:restoredGuardCount,isCorrection?false:restoredGuardLocked);
             startExamCountdown();
         } catch(error) {
+            isExamActive=false;stopExamCountdown();stopExamGuard();showScreen('screen-student-select');
             console.error('Exam entry failed:',error);
             alert(`❌ Unable to enter the exam.\n${error.message}\n\nIf this continues, show this message to your teacher.`);
         } finally {
@@ -3144,7 +3171,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         let qList = [];
         let qNum = 1;
 
-        rows.forEach(row => {
+        rows.forEach((row,rowIndex) => {
             const getVal = (...keys) => {
                 for (let k of keys) {
                     for (let rowKey in row) {
@@ -3171,10 +3198,11 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 let choiceD = getVal('Choice D', 'Option D', 'Choice_D', 'Option_D', 'D');
                 let answer = getVal('Answer', 'answer', 'Ans', '答案') || '';
                 let pointsStr = getVal('Points', 'points', 'Score', '配分');
-                let points = pointsStr ? parseFloat(pointsStr) : 0;
+                let points = pointsStr ? Number(pointsStr) : 0;
 
                 qList.push({
                     id: qNum++,
+                    sourceRow:rowIndex+2,
                     type: type,
                     stem: stem,
                     choice_a: choiceA,
@@ -3281,7 +3309,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             input.className = 'text-answer-input';
             input.placeholder = 'Type your answer here...';
             input.value = userAnswers[q.id] || '';
-            input.oninput = function() { userAnswers[q.id] = this.value.trim(); };
+            input.oninput = function() { userAnswers[q.id] = this.value.trim();queueDraftSave(); };
             input.addEventListener('keypress', function(e) {
                 if (e.key === 'Enter') {
                     if (currentIndex < questions.length - 1) {
@@ -3311,10 +3339,10 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                     let isChecked = userAnswers[q.id] === opt.val;
                     label.innerHTML = `
                         <input type="radio" name="option" value="${opt.val}" ${isChecked ? 'checked' : ''}>
-                        <span>(${opt.val}) ${opt.text}</span>
+                        <span>(${opt.val}) ${escapeHTML(opt.text)}</span>
                     `;
                     let radio = label.querySelector('input');
-                    radio.onchange = function() { userAnswers[q.id] = this.value; };
+                    radio.onchange = function() { userAnswers[q.id] = this.value;queueDraftSave(); };
                     group.appendChild(label);
                 }
             });
@@ -3332,7 +3360,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                     <span>${val}</span>
                 `;
                 let radio = label.querySelector('input');
-                radio.onchange = function() { userAnswers[q.id] = this.value; };
+                radio.onchange = function() { userAnswers[q.id] = this.value;queueDraftSave(); };
                 group.appendChild(label);
             });
             container.appendChild(group);
@@ -3343,7 +3371,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             input.className = 'text-answer-input';
             input.placeholder = 'Type your answer here...';
             input.value = userAnswers[q.id] || '';
-            input.oninput = function() { userAnswers[q.id] = this.value.trim(); };
+            input.oninput = function() { userAnswers[q.id] = this.value.trim();queueDraftSave(); };
             input.addEventListener('keypress', function(e) {
                 if (e.key === 'Enter') {
                     if (currentIndex < questions.length - 1) {
@@ -3364,7 +3392,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         saveCurrentAnswer();
         if (currentIndex > 0) {
             currentIndex--;
-            renderQuestion();
+            renderQuestion();queueDraftSave();
         }
     }
 
@@ -3372,7 +3400,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         saveCurrentAnswer();
         if (currentIndex < questions.length - 1) {
             currentIndex++;
-            renderQuestion();
+            renderQuestion();queueDraftSave();
         }
     }
 
@@ -3538,7 +3566,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             activeRecord.lastDepartureAt=new Date().toISOString();
         }
         saveCurrentAnswer();
-        savePageSession();
+        savePageSession();void flushDraft();
         if(examGuard.count<=2) {
             guardMessage('⚠️ Warning '+examGuard.count+' of 2: '+reason+'\n\nYour exam has not been submitted. '+(examGuard.count===1 ? 'You have one warning remaining.' : 'This is your final warning. The next departure will automatically submit your exam. Answered questions will be graded normally.')+'\n\nClick “Enter Fullscreen” to continue your exam.');
         } else {
@@ -3627,8 +3655,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
 
         if (await confirmExamSubmission(confirmMsg)) {
             if(savingResult || examGuard.locked || !isExamActive) return;
-            isExamActive = false; // 解除防護
-            showResults();
+            void showResults();
         }
     }
 
@@ -3655,15 +3682,17 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
 
     async function showResults(reason='manual') {
         if(savingResult) return;
+        if(draftBlocked && !isCorrectionMode){alert('This attempt was changed in another window. Reload to use its latest saved draft.');return;}
         if(closeSubmitConfirmation) closeSubmitConfirmation(false);
         if(!isCorrectionMode) {
             saveCurrentAnswer();
             activeRecord.submissionReason=activeRecord.submissionReason || (Date.now()>=examDeadline() ? 'time_limit' : reason);
-            activeRecord.timeLimitMinutes=30;
+            activeRecord.timeLimitMinutes=attemptDurationMinutes(activeRecord);
             activeRecord.deadlineAt=new Date(examDeadline()).toISOString();
             examGuard.locked=true;
             savePageSession();
         }
+        persistLocalDraft();
         stopExamCountdown();
         stopExamGuard();
         isExamActive = false; // 解除防誤刷保護
@@ -3714,6 +3743,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
 
                 detailsRecord.push({
                     id: q.id,
+                    type:q.type,choice_a:q.choice_a||'',choice_b:q.choice_b||'',choice_c:q.choice_c||'',choice_d:q.choice_d||'',
                     stem: q.stem,
                     userAns: uAns || 'No Answer',
                     correctAns: cAns,
@@ -3731,6 +3761,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             if(!isCorrectionMode) studentRecord.submissionClientInfo=collectExamClientInfo();
             if(!isCorrectionMode && ['time_limit','fullscreen_exit'].includes(studentRecord.submissionReason))finalizeAutomaticSubmission(studentRecord,studentRecord.submissionReason);
             studentRecord=await saveResultToCloud(targetDate, currentUser, studentRecord);
+            if(!isCorrectionMode)clearAttemptDraft(studentRecord.recordId);
+            unitRecords=unitRecords.filter(r=>r.recordId!==studentRecord.recordId);unitRecords.push(studentRecord);
             activeRecord=studentRecord;
         } catch(error) {
             console.error('Result save failed:', error);
@@ -3755,7 +3787,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         document.getElementById('result-student-name').innerText = `Student: ${studentDisplayName(currentUser,currentUserHR)} (${targetDate}) · ${recordLabel(studentRecord)}`;
         
         document.getElementById('final-score').innerHTML = `
-            Initial Exam Score: ${studentRecord.score} / ${studentRecord.totalPossible}<br>
+            Initial Exam Score: ${escapeHTML(studentRecord.score)} / ${escapeHTML(studentRecord.totalPossible)}<br>
             <span style="font-size:1.1rem; font-weight:600; color: ${remainingWrong > 0 ? 'var(--warning-color)' : 'var(--success-color)'}; margin-top: 6px; display: inline-block;">
                 ${remainingWrong > 0 ? `⚠️ ${remainingWrong} Question(s) Remaining to Correct` : '🎉 All Questions Corrected!'}
             </span>
@@ -3766,14 +3798,14 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             resultListHtml += `
                 <div class="result-card ${d.isCorrect ? 'correct' : 'incorrect'}">
                     <div class="res-header">
-                        <span>Question ${d.id} ${d.isCorrected ? '<span class="badge-corrected">Corrected</span>' : ''}</span>
+                        <span>Question ${escapeHTML(d.id)} ${d.isCorrected ? '<span class="badge-corrected">Corrected</span>' : ''}</span>
                         <span class="${d.isCorrect ? 'tag-correct' : 'tag-incorrect'}">
-                            ${d.isCorrect ? '✓ Correct' : '✗ Incorrect'} (${d.isCorrect ? d.points : 0} / ${d.points} pts)
+                            ${d.isCorrect ? '✓ Correct' : '✗ Incorrect'} (${escapeHTML(d.isCorrect ? d.points : 0)} / ${escapeHTML(d.points)} pts)
                         </span>
                     </div>
-                    <div style="margin-bottom: 8px;">${d.stem}</div>
+                    <div style="margin-bottom: 8px;">${escapeHTML(d.stem)}</div>
                     <div style="font-size: 0.95rem; color: var(--text-muted);">
-                        Your Answer: <strong>${d.userAns || 'No Answer'}</strong> | Correct Answer: <strong>${d.correctAns}</strong>
+                        Your Answer: <strong>${escapeHTML(d.userAns || 'No Answer')}</strong> | Correct Answer: <strong>${escapeHTML(d.correctAns)}</strong>
                     </div>
                 </div>
             `;
@@ -3983,19 +4015,19 @@ window.exportWeeklyWord=async button=>{
     window.printTrackReport=printTrackReport;
     async function collectDatabaseBackup() {
         const startedAt=new Date().toISOString();
-        const names=['records','examUnits','exams','examStarts','makeupAdmin','makeupChecks'];
+        const names=BACKUP_COLLECTIONS;
         const snapshots=await Promise.all(names.map(name=>getDocsFromServer(collection(db,name))));
         const collections={};
         const counts={};
         snapshots.forEach((snapshot,index)=>{
             const name=names[index];
-            collections[name]=snapshot.docs.map(document=>({id:document.id,data:document.data()}));
+            collections[name]=snapshot.docs.map(document=>({id:document.id,data:encodeFirestoreValue(document.data())}));
             counts[name]=collections[name].length;
         });
-        return {format:'LUYA-database-backup',version:1,projectId:firebaseConfig.projectId,
+        return {format:'LUYA-database-backup',version:2,projectId:firebaseConfig.projectId,
             startedAt,completedAt:new Date().toISOString(),counts,collections,
             scope:'All exam records, schedules, participation entries and private make-up settings; no date or class filters.',
-            excluded:['Authentication accounts','Firestore rules and indexes','subcollections','website files and Excel question files'],
+            excluded:['Authentication accounts','studentSessions (temporary name selections)','system maintenance controls','Firestore rules and indexes','subcollections','website files and Excel question files'],
             restoreNote:'Application JSON backup. Restore with a compatible import tool; not a Firebase managed-export file.'};
     }
     let databaseWarningPending=false;
@@ -4039,8 +4071,11 @@ window.exportWeeklyWord=async button=>{
         if(!await confirmDatabaseWarning('⚠️ Warning: Back up the database? Pause all testing until the backup is complete. Keep the downloaded file in a safe place; it contains student records.\n\nPress OK to start, or Cancel to do nothing.')) return;
         button.disabled=true;
         status.textContent='Reading database from Firebase. Please keep this page open…';
+        let maintenanceAcquired=false;
         try {
+            await setMaintenance(true);maintenanceAcquired=true;
             const backup=await collectDatabaseBackup();
+            await setMaintenance(false);maintenanceAcquired=false;
             const json=JSON.stringify(backup,null,2);
             const stamp=backup.completedAt.replace(/[:.]/g,'-');
             const filename=`LUYA_Backup_${firebaseConfig.projectId}_${stamp}.json`;
@@ -4052,14 +4087,16 @@ window.exportWeeklyWord=async button=>{
         } catch(error) {
             console.error('Database backup failed:',error);
             status.textContent=`Backup failed; no backup file was generated. ${error.message}`;
+            try{if(maintenanceAcquired)await setMaintenance(false);}catch{status.textContent+=' Maintenance is still enabled. Retry backup or restore before resuming exams.';}
         } finally {button.disabled=false;}
     }
     window.backupDatabase=backupDatabase;
-    const BACKUP_COLLECTIONS=['records','examUnits','exams','examStarts','makeupAdmin','makeupChecks'];
+    const BACKUP_COLLECTIONS=['records','examUnits','exams','examStarts','makeupAdmin','makeupChecks','attemptDrafts'];
     function validateBackupFile(backup) {
-        if(backup?.format!=='LUYA-database-backup' || backup.version!==1 || backup.projectId!==firebaseConfig.projectId)
+        if(backup?.format!=='LUYA-database-backup' || ![1,2].includes(backup.version) || backup.projectId!==firebaseConfig.projectId)
             throw new Error('This is not a compatible backup for this Firebase project.');
         if(!backup.completedAt || !Number.isFinite(Date.parse(backup.completedAt))) throw new Error('Invalid backup date.');
+        if(backup.version===1 && !backup.collections?.attemptDrafts){backup.collections.attemptDrafts=[];backup.counts.attemptDrafts=0;}
         const addedCollections=['examStarts','makeupAdmin','makeupChecks'];
         if(backup.collections && backup.counts && addedCollections.every(name=>!(name in backup.collections))) {
             for(const name of addedCollections) {backup.collections[name]=[];backup.counts[name]=0;}
@@ -4108,12 +4145,14 @@ window.exportWeeklyWord=async button=>{
         let completed=0;
         try {
             const backup=validateBackupFile(JSON.parse(await file.text()));
+            validateBackupRelations(backup);
             status.textContent='Checking current database before restore…';
+            await setMaintenance(true);
             const current=await collectDatabaseBackup();
             const operations=restoreOperations(backup,current);
             const deletions=operations.filter(action=>action.type==='delete').length;
-            const counts=BACKUP_COLLECTIONS.map(name=>`${name}: ${current.counts[name]} → ${backup.counts[name]}`).join('\n');
-            if(!await confirmDatabaseWarning(`⚠️ Warning: Restore database to backup dated ${new Date(backup.completedAt).toLocaleString()}?\n\n${counts}\n\n${deletions} documents not in the backup will be DELETED. Matching documents will be REPLACED.\n\nBefore continuing, stop all students and other administrators from using the site. A safety backup will be downloaded before changes begin. Large restores run in batches and can partially complete if interrupted.\n\nContinue with full replacement?`)) {status.textContent='Restore cancelled. Database unchanged.';return;}
+            const counts=BACKUP_COLLECTIONS.map(name=>`${escapeHTML(name)}: ${current.counts[name]} → ${backup.counts[name]}`).join('\n');
+            if(!await confirmDatabaseWarning(`⚠️ Warning: Restore database to backup dated ${new Date(backup.completedAt).toLocaleString()}?\n\n${counts}\n\n${deletions} documents not in the backup will be DELETED. Matching documents will be REPLACED.\n\nBefore continuing, stop all students and other administrators from using the site. A safety backup will be downloaded before changes begin. Large restores run in batches and can partially complete if interrupted.\n\nContinue with full replacement?`)) {await setMaintenance(false);status.textContent='Restore cancelled. Database unchanged.';return;}
             downloadSafetyBackup(current);
             for(let offset=0;offset<operations.length;) {
                 const batch=writeBatch(db);let bytes=0,count=0;
@@ -4122,7 +4161,7 @@ window.exportWeeklyWord=async button=>{
                     const size=new TextEncoder().encode(JSON.stringify(action)).length;
                     if(count && bytes+size>2000000) break;
                     const ref=doc(db,action.name,action.id);
-                    if(action.type==='delete') batch.delete(ref);else batch.set(ref,action.data);
+                    if(action.type==='delete') batch.delete(ref);else batch.set(ref,decodeFirestoreValue(action.data));
                     bytes+=size;count++;
                 }
                 await batch.commit();offset+=count;completed=offset;
@@ -4133,6 +4172,7 @@ window.exportWeeklyWord=async button=>{
                 const ordered=entries=>[...entries].sort((a,b)=>a.id.localeCompare(b.id));
                 if(canonicalJSON(ordered(restored.collections[name]))!==canonicalJSON(ordered(backup.collections[name]))) throw new Error(`Verification mismatch in ${name}. Stop other users and restore again.`);
             }
+            await setMaintenance(false);
             sessionStorage.removeItem(SESSION_KEY);
             document.getElementById('records-list').textContent='Database restored. Select a report to load the restored data.';
             await renderUnits();
@@ -4147,6 +4187,171 @@ window.exportWeeklyWord=async button=>{
         if(!isAdmin || !isAllowedAdmin(auth.currentUser) || document.getElementById('btn-restore-database').disabled || document.getElementById('btn-backup-database').disabled) return;
         if(await confirmDatabaseWarning('⚠️ Warning: Restoring replaces current exam records and unit settings with the selected backup and deletes data not in that backup. Pause all testing and save a current backup before continuing.\n\nPress OK to select a backup file, or Cancel to do nothing.')) document.getElementById('restore-file').click();
     };
+
+    function escapeHTML(value) {
+        return String(value ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+    function showScreen(screen) {
+        for(const id of ['screen-login','screen-admin','screen-student-select','screen-exam','screen-result'])
+            document.getElementById(id).classList.toggle('hidden',id!==screen);
+    }
+    function reportSurface() {
+        const old=document.getElementById('records-list'),fresh=old.cloneNode(false);
+        old.replaceWith(fresh);return fresh;
+    }
+    async function bindStudentName(name,hr) {
+        const bytes=new TextEncoder().encode(`${hr}\n${normalizeLoginValue(name)}`);
+        const studentKey=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),v=>v.toString(16).padStart(2,'0')).join('');
+        await setDoc(doc(db,'studentSessions',auth.currentUser.uid),{studentName:name,studentHR:hr,studentKey});
+    }
+    async function assertTestingAvailable() {
+        const state=await getDocFromServer(doc(db,'system','maintenance'));
+        if(state.exists() && state.data().enabled)throw Error('Database maintenance is in progress. Your local answers are retained; retry when your teacher resumes testing.');
+    }
+    async function setMaintenance(enabled) {
+        await runTransaction(db,async tx=>{
+            const ref=doc(db,'system','maintenance'),old=await tx.get(ref);
+            if(enabled && old.exists() && old.data().enabled)throw Error('Maintenance is already enabled. Finish or recover the previous backup/restore before retrying.');
+            tx.set(ref,{enabled,owner:auth.currentUser.uid,updatedAt:new Date().toISOString()});
+        });
+    }
+    window.resumeTestingAfterMaintenance=async()=>{
+        if(!isAdmin || document.getElementById('btn-restore-database').disabled || document.getElementById('btn-backup-database').disabled)return;
+        if(await confirmDatabaseWarning('Resume testing? Only continue after a failed restore has been recovered or verified. This does not repair a partially restored database.')) {
+            try{await setMaintenance(false);document.getElementById('backup-status').textContent='Testing resumed.';}
+            catch(error){alert(error.message);}
+        }
+    };
+    const maintenanceButton=document.createElement('button');
+    maintenanceButton.className='btn btn-inline btn-secondary';maintenanceButton.textContent='Resume after maintenance';
+    maintenanceButton.onclick=window.resumeTestingAfterMaintenance;
+    document.getElementById('btn-restore-database').after(maintenanceButton);
+
+    function validateExamQuestions(items,filename) {
+        if(!Array.isArray(items)||!items.length)throw Error(`${filename}: no questions`);
+        const ids=new Set();let total=0;
+        for(const q of items) {
+            const at=`${filename}, row ${q.sourceRow||'?'} / Q${q.id}`;
+            const type=String(q.type||'').toUpperCase().replace(/^TYPE[\s_]*/i,'').trim();
+            if(!['A','FILL_IN','TEXT','B','C','CHOICE','SELECT','D','TF','TRUE_FALSE','BOOLEAN'].includes(type))throw Error(`${at}: unsupported question type`);
+            if(!Number.isInteger(q.id)||q.id<1||ids.has(q.id)||!String(q.stem||'').trim()||!String(q.answer??'').trim())throw Error(`${at}: invalid ID, question or answer`);
+            ids.add(q.id);
+            if(!Number.isFinite(q.points)||q.points<0)throw Error(`${at}: points must be a non-negative number`);
+            total+=q.points;
+            if(['B','C','CHOICE','SELECT'].includes(type)) {
+                if(!['A','B','C','D'].includes(q.answer)||!q['choice_'+q.answer.toLowerCase()])throw Error(`${at}: answer must refer to a non-empty A–D option`);
+                if(['a','b','c','d'].filter(k=>q['choice_'+k]).length<2)throw Error(`${at}: at least two choices are required`);
+            }
+            if(['D','TF','TRUE_FALSE','BOOLEAN'].includes(type)&&!['true','false','t','f','1','0','yes','no','y','n'].includes(String(q.answer).toLowerCase()))throw Error(`${at}: invalid True/False answer`);
+        }
+        if(total<=0)throw Error(`${filename}: total points must be positive`);
+    }
+    async function preflightFullscreen() {
+        if(!(document.documentElement.requestFullscreen||document.documentElement.webkitRequestFullscreen))throw Error('This browser cannot enter fullscreen. Use a supported browser before starting the exam.');
+    }
+    let draftRevision=0,draftBlocked=false,draftFlight=null,draftTimer=null,correctionBase=null;
+    let restoredGuardCount=0,restoredGuardLocked=false;
+    const draftKey=id=>'luya-attempt-draft-v2:'+id;
+    function localDraft(id) {
+        try{return JSON.parse(localStorage.getItem(draftKey(id))||'null');}catch{return null;}
+    }
+    function persistLocalDraft() {
+        if(isCorrectionMode || !activeRecord?.recordId || !questions.length || draftBlocked)return;
+        try {
+            localStorage.setItem(draftKey(activeRecord.recordId),JSON.stringify({recordId:activeRecord.recordId,startedAt:activeRecord.startedAt,
+                studentName:currentUser,studentHR:currentUserHR,answers:{...userAnswers},currentIndex,
+                revision:draftRevision,updatedMs:Date.now(),departureCount:examGuard.count,locked:examGuard.locked,
+                submissionReason:activeRecord.submissionReason||''}));
+        } catch(error){document.getElementById('student-sync-status').textContent='Local draft could not be saved. Keep this window open and check storage availability.';}
+    }
+    function queueDraftSave() {
+        savePageSession();
+        if(!isExamActive || isCorrectionMode || savingResult || draftBlocked || examGuard.locked)return;
+        clearTimeout(draftTimer);draftTimer=setTimeout(()=>void flushDraft(),700);
+    }
+    async function flushDraft() {
+        if(draftFlight)return draftFlight;
+        if(!isExamActive || isCorrectionMode || draftBlocked || !activeRecord?.recordId || Date.now()>=attemptDeadline(activeRecord))return;
+        persistLocalDraft();
+        const payload={recordId:activeRecord.recordId,startedAt:activeRecord.startedAt,studentName:currentUser,studentHR:currentUserHR,
+            answers:{...userAnswers},currentIndex,departureCount:examGuard.count,locked:examGuard.locked,
+            submissionReason:activeRecord.submissionReason||'',updatedMs:Date.now()};
+        const expected=draftRevision;
+        draftFlight=runTransaction(db,async tx=>{
+            const ref=doc(db,'attemptDrafts',payload.recordId),old=await tx.get(ref);
+            const revision=old.exists()?Number(old.data().revision)||0:0;
+            if(revision!==expected)throw Object.assign(Error('The draft changed in another window. Reload to resume the newest saved version.'),{code:'draft-conflict'});
+            tx.set(ref,{...payload,revision:revision+1});return revision+1;
+        }).then(revision=>{draftRevision=revision;persistLocalDraft();},error=>{
+            if(error.code==='draft-conflict') {
+                draftBlocked=true;stopExamCountdown();stopExamGuard();
+                guardMessage(error.message);guardButton.textContent='Reload saved draft';guardButton.onclick=()=>location.reload();
+            } else document.getElementById('student-sync-status').textContent='Cloud draft not synced. Local answers are retained; keep this browser available.';
+        }).finally(()=>{draftFlight=null;});
+        return draftFlight;
+    }
+    async function restoreAttemptDraft(resuming) {
+        restoredGuardCount=0;restoredGuardLocked=false;
+        const id=activeRecord.recordId,cloud=await getDocFromServer(doc(db,'attemptDrafts',id));
+        const remote=cloud.exists()?cloud.data():null,candidate=localDraft(id);
+        const local=candidate?.startedAt===activeRecord.startedAt?candidate:null;
+        draftRevision=remote?.revision||0;
+        // A newer remote revision wins over another tab's stale local draft.
+        let saved=local&&sameStudent(local,currentStudent())&&(!remote || Number(local.revision)>=draftRevision) ? local : remote;
+        if(!saved && resuming) {
+            try {
+                const old=JSON.parse(sessionStorage.getItem(SESSION_KEY)||'null');
+                if(old?.activeRecord?.recordId===id&&old.activeRecord.startedAt===activeRecord.startedAt)saved={answers:old.userAnswers||{},currentIndex:old.currentIndex,departureCount:old.examGuardCount,locked:old.examGuardLocked};
+            } catch{}
+        }
+        if(resuming && !saved)throw Error('No saved answers were found for this existing attempt. Ask Administrator to review it; no zero score was created.');
+        if(saved) {
+            for(const q of questions)if(typeof saved.answers?.[q.id]==='string')userAnswers[q.id]=saved.answers[q.id];
+            currentIndex=Math.max(0,Math.min(Number(saved.currentIndex)||0,questions.length-1));
+            restoredGuardCount=Math.max(0,Number(saved.departureCount)||0);restoredGuardLocked=saved.locked===true||restoredGuardCount>=3;
+            if(saved.submissionReason)activeRecord.submissionReason=saved.submissionReason;
+        }
+    }
+    function clearAttemptDraft(id) {clearTimeout(draftTimer);try{localStorage.removeItem(draftKey(id));}catch{}}
+    setInterval(()=>{if(isExamActive&&!isCorrectionMode&&!savingResult&&!examGuard.locked)void flushDraft();},10000);
+    document.addEventListener('visibilitychange',()=>{if(document.hidden&&isExamActive){savePageSession();void flushDraft();}});
+
+    function encodeFirestoreValue(value) {
+        if(value instanceof Timestamp)return {__luyaType:'timestamp',seconds:value.seconds,nanoseconds:value.nanoseconds};
+        if(value instanceof GeoPoint)return {__luyaType:'geopoint',latitude:value.latitude,longitude:value.longitude};
+        if(Array.isArray(value))return value.map(encodeFirestoreValue);
+        if(value&&typeof value==='object') {
+            if(Object.getPrototypeOf(value)!==Object.prototype && Object.getPrototypeOf(value)!==null)throw Error('Backup contains an unsupported Firestore type. Use a managed export for this data.');
+            if('__luyaType' in value)throw Error('Reserved backup field __luyaType occurs in data.');
+            return Object.fromEntries(Object.entries(value).map(([k,v])=>[k,encodeFirestoreValue(v)]));
+        }
+        if(typeof value==='number'&&!Number.isFinite(value))throw Error('Backup contains a non-finite number.');
+        return value;
+    }
+    function decodeFirestoreValue(value) {
+        if(Array.isArray(value))return value.map(decodeFirestoreValue);
+        if(value&&typeof value==='object') {
+            if(value.__luyaType==='timestamp')return new Timestamp(value.seconds,value.nanoseconds);
+            if(value.__luyaType==='geopoint')return new GeoPoint(value.latitude,value.longitude);
+            if(value.__luyaType)throw Error('Unknown backup value type');
+            return Object.fromEntries(Object.entries(value).map(([k,v])=>[k,decodeFirestoreValue(v)]));
+        }
+        return value;
+    }
+    function validateBackupRelations(backup) {
+        const starts=new Map(backup.collections.examStarts.map(e=>[e.id,e.data]));
+        for(const row of backup.collections.records) {
+            const r=row.data;decodeFirestoreValue(r);
+            if(!r.studentName || !Number.isFinite(r.score)||!Number.isFinite(r.totalPossible)||r.score<0||r.totalPossible<r.score||!Array.isArray(r.details))throw Error(`Invalid result: ${row.id}`);
+            if(r.schemaVersion===2) {
+                const a=starts.get(row.id);
+                if(!a || a.studentName!==r.studentName || a.studentHR!==r.studentHR || a.unitId!==r.unitId)throw Error(`Result/attempt mismatch: ${row.id}`);
+            }
+        }
+        for(const row of backup.collections.attemptDrafts)if(!starts.has(row.id))throw Error(`Orphan saved draft: ${row.id}`);
+        for(const row of backup.collections.examUnits)if(row.data.isOpen && row.data.scheduleEnabled && !examWindow(row.data))throw Error(`Invalid schedule: ${row.id}`);
+        for(const rows of Object.values(backup.collections))for(const row of rows)decodeFirestoreValue(row.data);
+    }
 
     // Load Name.xlsx automatically after the page DOM is ready.
     loadStudentDirectory().then(restorePageSession);
