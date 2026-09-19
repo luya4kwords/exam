@@ -644,8 +644,7 @@
             <input type="text" id="input-username" class="input-text" placeholder="e.g., Peter Pan (Full English Name)" onkeypress="if(event.key==='Enter') verifyLogin()" onfocus="resetLoginInput()">
         </div>
         <div class="login-actions">
-        <button type="button" id="btn-admin-login" class="btn btn-inline btn-secondary" onclick="loginGoogleAdmin()">Administrator / Google</button>
-        <button id="btn-login" class="btn btn-inline" onclick="verifyLogin()" disabled>Login</button>
+        <button id="btn-login" class="btn btn-inline" onclick="verifyLogin()">Login</button>
         </div>
         <p id="admin-login-message" class="status-msg" aria-live="polite"></p>
     </div>
@@ -928,11 +927,12 @@
     const isAllowedAdmin = user => user?.emailVerified === true && ADMIN_EMAILS.includes(user.email?.toLowerCase());
     const authReady = setPersistence(auth, browserSessionPersistence);
     authReady.catch(error => console.error('Authentication initialization:', error));
+    let adminLoginPending=false;
     async function loginGoogleAdmin() {
-        const button=document.getElementById('btn-admin-login');
+        const button=document.getElementById('btn-login');
         const message=document.getElementById('admin-login-message');
-        if(button.disabled) return;
-        button.disabled=true;
+        if(adminLoginPending)return;
+        adminLoginPending=true;button.disabled=true;
         message.textContent='正在開啟 Google 登入…';
         try {
             await authReady;
@@ -959,7 +959,7 @@
             message.textContent=error.code==='auth/unauthorized-domain'
                 ? '請在 Firebase Authentication → 設定 → 已授權網域，加入 luyahuang.github.io。'
                 : `登入未完成：${error.message}。若彈出視窗遭封鎖，請允許本站彈出視窗後重試。`;
-        } finally {button.disabled=false;}
+        } finally {adminLoginPending=false;button.disabled=false;}
     }
     window.loginGoogleAdmin=loginGoogleAdmin;
 
@@ -1089,15 +1089,16 @@
 
             studentDirectoryLoaded = true;
             input.disabled = false;
-            loginButton.disabled = false;
+            loginButton.disabled = adminLoginPending;
             loginButton.innerText = 'Login';
         } catch (error) {
             console.error('Student directory load error:', error);
             studentDirectory = [];
             studentDirectoryLoaded = false;
-            input.disabled = true;
-            loginButton.disabled = true;
-            loginButton.innerText = 'Student list unavailable';
+            input.disabled = false;
+            loginButton.disabled = adminLoginPending;
+            loginButton.innerText = 'Login';
+            document.getElementById('admin-login-message').textContent='Student list unavailable. Please try again later.';
         }
     }
 
