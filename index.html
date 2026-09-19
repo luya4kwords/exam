@@ -1356,6 +1356,9 @@ function eligibleStudent(state,student) {
 }
 function absenceEntries(student,states,records,attempts=[],now=Date.now()) {
     return states.flatMap(state=>{
+        // Admin Off cancels the unit (isOpen=false). Cancelled units are not absent/makeup-eligible.
+        // Formal exams keep isOpen=true after the scheduled window ends.
+        if(state.isOpen!==true) return [];
         const window=examWindow(state);
         if(!window || now<window.end || !eligibleStudent(state,student)) return [];
         const own=records.filter(record=>sameExam(record,state) && sameStudent(record,student));
@@ -1548,8 +1551,10 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         const missed=absenceEntries(student,[state],unitRecords,examStarts).some(e=>e.status==='pending');
         let host=null;
         if(!regular) {
+            // Re-check absence against latest policy: turned-off units are not makeup-eligible.
+            const stillMissed=absenceEntries(student,[state],unitRecords,examStarts).some(e=>e.status==='pending');
             const hosts=makeupHosts(statesForPolicy());
-            if(!missed || !hosts.length) throw new Error('Make-up exams are only available during a supervised exam session.');
+            if(!stillMissed || !hosts.length) throw new Error('Make-up is not available for this unit. It may have been closed by your teacher, or no supervised make-up session is open.');
             const noCodeHosts=noCodeMakeupHosts(statesForPolicy());
             const codeHosts=codeMakeupHosts(statesForPolicy());
             if(noCodeHosts.length) {
@@ -1573,6 +1578,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             if(existing.exists()) throw new Error('This exam has already been started. Resume it in the original browser, or ask your teacher for help.');
             const fresh={...latest.data(),unitId:unitKey(book,unit)};
             if(!host && (examPhase(fresh)!=='active' || !eligibleStudent(fresh,student))) throw new Error('The exam entry time has ended.');
+            if(host && (fresh.isOpen!==true || !examWindow(fresh) || Date.now()<examWindow(fresh).end))
+                throw new Error('Make-up is not available for this unit. It may have been closed by your teacher.');
             const now=new Date().toISOString();
             const durationMins=Number(fresh.examDurationMinutes);
             const attempt={book,unit,unitId:unitKey(book,unit),studentName:currentUser,studentHR:currentUserHR,
@@ -1751,7 +1758,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         if(offBtn.disabled || offBtn.classList.contains('hidden')) return;
         const {book,unit}=pendingUnitClasses;
         const key=unitKey(book,unit);
-        if(!confirm(`Turn off ${unitLabel(book,unit)}?\n\nStudents will no longer be able to take this exam during the scheduled window.`)) return;
+        if(!confirm(`Turn off ${unitLabel(book,unit)}?\n\nThis will clear the schedule, make-up settings, and all open-session data for this unit. Students will not be able to take or make up this exam until it is opened again.`)) return;
         savingUnitClasses=true;
         offBtn.disabled=true;
         document.getElementById('unit-class-confirm').disabled=true;
@@ -1767,23 +1774,18 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 if(!snap.exists()) throw new Error('Unit settings were not found.');
                 const prior=snap.data();
                 if(prior.hasParticipation) throw new Error('This unit can no longer be turned off because a student has started the exam.');
-                const state={...prior,book,unit,isOpen:false,generateMakeupCode:false,allowNoCodeMakeup:false,
-                    scheduleEnabled:false,availabilityHistory:[],
-                    updatedAt:new Date().toISOString()};
-                // Remove schedule timestamps so the unit is fully closed (no residual window / makeup eligibility).
-                state.startsAt=deleteField();
-                state.endsAt=deleteField();
-                state.startMs=deleteField();
-                state.endMs=deleteField();
-                state.openedDate=deleteField();
-                state.makeupSessionId=deleteField();
+                // Full replace: wipe every open/schedule/makeup field so the unit is as if never opened.
+                const state={
+                    book,unit,
+                    isOpen:false,
+                    scheduleEnabled:false,
+                    availabilityHistory:[],
+                    generateMakeupCode:false,
+                    allowNoCodeMakeup:false,
+                    updatedAt:new Date().toISOString()
+                };
                 transaction.set(unitRef,state);
-                // Local cache without FieldValue sentinels
-                const local={...prior,book,unit,isOpen:false,generateMakeupCode:false,allowNoCodeMakeup:false,
-                    scheduleEnabled:false,availabilityHistory:[],updatedAt:state.updatedAt};
-                delete local.startsAt; delete local.endsAt; delete local.startMs; delete local.endMs;
-                delete local.openedDate; delete local.makeupSessionId;
-                return local;
+                return state;
             });
             unitStates[key]=saved;
             drawUnits();
