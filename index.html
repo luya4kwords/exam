@@ -92,11 +92,14 @@
         #unit-exam-duration {font:inherit;border:1px solid #cbd5e1;border-radius:7px;padding:8px 10px;min-width:140px;}
         #unit-schedule-notice {font-size:.85rem;color:#64748b;margin:10px 0;}
         #modal-unit-classes fieldset + #unit-schedule-notice {margin-top:4px;}
-        #modal-absent-units .modal-card {max-width:520px;max-height:90vh;overflow-y:auto;}
-        #absent-unit-options {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;max-height:280px;overflow-y:auto;padding:4px 0;}
-        #absent-unit-options label {display:flex;align-items:center;gap:7px;padding:8px 10px;border:1px solid #e9d5ff;border-radius:8px;cursor:pointer;font-weight:600;background:#faf5ff;color:#6b21a8;}
+        #modal-absent-units .modal-card {max-width:720px;max-height:90vh;overflow-y:auto;}
+        #absent-unit-options {display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;max-height:320px;overflow-y:auto;padding:4px 0;}
+        #absent-unit-options label {display:flex;align-items:center;gap:7px;padding:8px 10px;border:1px solid #e9d5ff;border-radius:8px;cursor:pointer;font-weight:600;background:#faf5ff;color:#6b21a8;min-width:0;}
         #absent-unit-options label.absent-all {grid-column:1 / -1;background:#eff6ff;border-color:#bfdbfe;color:#1d4ed8;font-weight:800;}
-        @media(max-width:420px) {.schedule-columns {grid-template-columns:1fr;} #absent-unit-options {grid-template-columns:1fr;}}
+        #absent-include-total-wrap {margin-top:14px;padding:12px;border:1px solid #e9d5ff;border-radius:10px;background:#faf5ff;}
+        #absent-include-total-wrap label {display:flex;align-items:center;gap:8px;font-weight:700;color:#6b21a8;cursor:pointer;}
+        @media(max-width:640px) {#absent-unit-options {grid-template-columns:repeat(3,minmax(0,1fr));}}
+        @media(max-width:420px) {.schedule-columns {grid-template-columns:1fr;} #absent-unit-options {grid-template-columns:repeat(2,minmax(0,1fr));}}
 
         /* Header Layout */
         .header-container {
@@ -799,8 +802,10 @@
 <div id="modal-absent-units" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="absent-units-title">
     <div class="modal-card">
         <h3 id="absent-units-title" class="modal-title">⛔ Select Units for Absent List</h3>
-        <p style="font-size:0.9rem;color:#64748b;margin-bottom:12px;">Choose completed units to count absences. Use All to select every listed unit.</p>
         <div id="absent-unit-options"></div>
+        <div id="absent-include-total-wrap">
+            <label><input id="absent-include-total" type="checkbox"> Total Absent Units per Student</label>
+        </div>
         <div class="modal-btn-row">
             <button class="btn btn-secondary" onclick="closeAbsentUnitsModal()">Cancel</button>
             <button class="btn" onclick="submitAbsentUnitsSelection()">Show Absent List</button>
@@ -2237,6 +2242,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             });
             allCb.checked=true;
             unitBoxes.forEach(box=>{box.checked=true;});
+            const includeTotal=document.getElementById('absent-include-total');
+            if(includeTotal) includeTotal.checked=false;
             document.getElementById('modal-absent-units').classList.remove('hidden');
         } catch(error) {
             console.error('Absent List Error:', error);
@@ -2247,6 +2254,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         if(!isAdmin)return;
         const selected=[...document.querySelectorAll('#absent-unit-options input[name="absent-unit"]:checked')].map(cb=>cb.value);
         if(!selected.length) {alert('Please select at least one unit.');return;}
+        const includeTotalPerStudent=!!document.getElementById('absent-include-total')?.checked;
         closeAbsentUnitsModal();
         const container=document.getElementById('records-list');
         container.innerHTML='<p style="color: var(--text-muted); font-size: 0.9rem;">⏳ Scanning absentee records for selected units...</p>';
@@ -2291,7 +2299,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                   a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
               );
 
-            renderAbsentStudentsUI(absentList, unitStats);
+            renderAbsentStudentsUI(absentList, unitStats, includeTotalPerStudent);
         } catch(error) {
             console.error('Absent List Error:', error);
             container.innerHTML='<p style="color: var(--danger-color); font-size: 0.9rem;">❌ Failed to load absentee list. Please try again.</p>';
@@ -2299,13 +2307,14 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     }
     window.submitAbsentUnitsSelection=submitAbsentUnitsSelection;
 
-    function renderAbsentStudentsUI(absentList, unitStats) {
+    function renderAbsentStudentsUI(absentList, unitStats, includeTotalPerStudent=false) {
         const container = document.getElementById('records-list');
         const totalExamsCount = Array.isArray(unitStats) ? unitStats.length : 0;
         const formatAbsentStudent = (s) => `${s.hr} ${studentDisplayName(s.name, s.hr)}`.trim();
         const exportPayload = {
             title: 'Absent List',
             generatedAt: new Date().toISOString(),
+            includeTotalPerStudent: !!includeTotalPerStudent,
             unitStats: (unitStats || []).map(u => ({
                 unit: u.label,
                 date: u.date,
@@ -2316,13 +2325,13 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                     label: formatAbsentStudent(s)
                 }))
             })),
-            totalPerStudent: (absentList || []).map(row => ({
+            totalPerStudent: includeTotalPerStudent ? (absentList || []).map(row => ({
                 hr: row.hr,
                 name: row.name,
                 label: `${row.hr} ${studentDisplayName(row.name, row.hr)}`.trim(),
                 absentUnits: row.count,
                 dates: row.dates || []
-            }))
+            })) : []
         };
         const exportAttr = encodeURIComponent(JSON.stringify(exportPayload));
 
@@ -2335,50 +2344,61 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 </div></div>
         `;
 
-        // Per-unit absence counts
+        // Per-unit section — expanded student lists in the same style as Total Absent Units
         tableHtml += `
             <div style="text-align:left;margin:8px 0 20px;">
                 <h4 style="color:#6b21a8;margin:0 0 10px;font-size:1.05rem;">📊 Absences by Unit</h4>
-                <table style="width:100%; border-collapse:collapse; text-align:center; font-size:0.95rem;">
-                    <thead>
-                        <tr style="background:#f3e8ff; border-bottom:2px solid #d8b4fe; color:#6b21a8;">
-                            <th style="padding:10px; text-align:left;">Unit</th>
-                            <th style="padding:10px;">Exam Date</th>
-                            <th style="padding:10px;">Absent Students</th>
-                        </tr>
-                    </thead>
-                    <tbody>
         `;
         if (!unitStats || unitStats.length === 0) {
-            tableHtml += `<tr><td colspan="3" style="padding:16px; color:#16a34a; font-weight:700;">No selected units.</td></tr>`;
+            tableHtml += `<p style="padding:12px; color:#16a34a; font-weight:700;">No selected units.</p>`;
         } else {
             unitStats.forEach((u, idx) => {
                 const detailId = `absent-unit-detail-${idx}`;
-                const studentChips = (u.absentees || []).map(s =>
-                    `<div style="display:inline-block; padding:4px 10px; background:#fff; border:1px solid #e9d5ff; border-radius:6px; margin:3px; font-size:0.85rem; color:#6b21a8; font-weight:600;">${s.hr} ${studentDisplayHTML(s.name,s.hr)}</div>`
-                ).join('');
                 tableHtml += `
-                    <tr style="border-bottom:1px solid #e2e8f0;">
-                        <td style="padding:12px; text-align:left; font-weight:700;">${u.label}</td>
-                        <td style="padding:12px;">${u.date || '—'}</td>
-                        <td style="padding:12px; font-weight:800; color:var(--purple-color);">
-                            ${u.count}
-                            ${u.count ? `<button class="btn btn-inline btn-secondary" style="margin-left:8px;" onclick="toggleDetails('${detailId}')">🔍 View</button>` : ''}
-                        </td>
-                    </tr>
-                    <tr id="${detailId}" class="hidden" style="background:#faf5ff;">
-                        <td colspan="3" style="padding:12px; text-align:left;">
-                            <div style="font-weight:700; color:#6b21a8; margin-bottom:8px;">Absent students:</div>
-                            ${studentChips || '<span style="color:#16a34a;">None</span>'}
-                        </td>
-                    </tr>
+                    <div style="margin-bottom:16px;border:1px solid #e9d5ff;border-radius:10px;overflow:hidden;">
+                        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 14px;background:#f3e8ff;">
+                            <div style="font-weight:800;color:#6b21a8;">${u.label} <span style="font-weight:600;color:#64748b;font-size:0.9rem;">(${u.date || '—'})</span></div>
+                            <div style="font-weight:800;color:var(--purple-color);">${u.count} student(s)
+                                <button class="btn btn-inline btn-secondary" style="margin-left:8px;" onclick="toggleDetails('${detailId}')">🔍 View</button>
+                            </div>
+                        </div>
+                        <div id="${detailId}" style="background:#faf5ff;">
+                            <table style="width:100%; border-collapse:collapse; text-align:center; font-size:0.95rem;">
+                                <thead>
+                                    <tr style="border-bottom:1px solid #e9d5ff; color:#6b21a8;">
+                                        <th style="padding:10px; text-align:left;">Class + Student Name</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
                 `;
+                if (!(u.absentees || []).length) {
+                    tableHtml += `<tr><td style="padding:12px; color:#16a34a; font-weight:700; text-align:left;">No absences for this unit.</td></tr>`;
+                } else {
+                    let displayedClass = '';
+                    (u.absentees || []).forEach(s => {
+                        if (s.hr !== displayedClass) {
+                            tableHtml += `
+                                <tr style="background:linear-gradient(135deg, #3b82f6, #60a5fa);">
+                                    <td style="padding:8px 12px; text-align:left; font-weight:800; color:#ffffff;">Homeroom ${s.hr}</td>
+                                </tr>
+                            `;
+                            displayedClass = s.hr;
+                        }
+                        tableHtml += `
+                            <tr style="border-bottom:1px solid #e2e8f0;">
+                                <td style="padding:10px 12px; text-align:left; font-weight:700;">👤 <span style="color:#16a34a;">${s.hr}</span> <span style="color:#0f172a;">${studentDisplayHTML(s.name,s.hr)}</span></td>
+                            </tr>
+                        `;
+                    });
+                }
+                tableHtml += `</tbody></table></div></div>`;
             });
         }
-        tableHtml += `</tbody></table></div>`;
+        tableHtml += `</div>`;
 
-        // Total Absent Units per Student
-        tableHtml += `
+        // Total Absent Units per Student — only when requested
+        if (includeTotalPerStudent) {
+            tableHtml += `
             <div style="text-align:left;margin:8px 0 8px;">
                 <h4 style="color:#6b21a8;margin:0 0 10px;font-size:1.05rem;">👤 Total Absent Units per Student</h4>
                 <table style="width:100%; border-collapse:collapse; text-align:center; font-size:0.95rem;">
@@ -2390,62 +2410,65 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                         </tr>
                     </thead>
                     <tbody>
-        `;
+            `;
 
-        if (!absentList || absentList.length === 0) {
-            tableHtml += `<tr><td colspan="3" style="padding:16px; color:#16a34a; font-weight:700;">No pending absences were found for the selected units.</td></tr>`;
-        } else {
-            const classCounts = absentList.reduce((counts, row) => {
-                counts[row.hr] = (counts[row.hr] || 0) + 1;
-                return counts;
-            }, {});
-            let displayedClass = '';
+            if (!absentList || absentList.length === 0) {
+                tableHtml += `<tr><td colspan="3" style="padding:16px; color:#16a34a; font-weight:700;">No pending absences were found for the selected units.</td></tr>`;
+            } else {
+                const classCounts = absentList.reduce((counts, row) => {
+                    counts[row.hr] = (counts[row.hr] || 0) + 1;
+                    return counts;
+                }, {});
+                let displayedClass = '';
 
-            absentList.forEach((row, idx) => {
-                if (row.hr !== displayedClass) {
+                absentList.forEach((row, idx) => {
+                    if (row.hr !== displayedClass) {
+                        tableHtml += `
+                            <tr style="background:linear-gradient(135deg, #3b82f6, #60a5fa); border-top:2px solid #2563eb; box-shadow:inset 0 1px 0 rgba(255,255,255,0.45);">
+                                <td colspan="3" style="padding:10px 12px; text-align:left; font-weight:800; color:#ffffff; text-shadow:0 1px 1px rgba(30,64,175,0.25);">Homeroom ${row.hr}</td>
+                            </tr>
+                        `;
+                        displayedClass = row.hr;
+                    }
+                    const detailId = `absent-detail-${idx}`;
+                    let detailsListHtml = (row.dates || []).map(d => `
+                        <div style="display:inline-block; padding:6px 12px; background:#fff; border:1px solid #e9d5ff; border-radius:6px; margin:4px; font-size:0.88rem; color:#6b21a8; font-weight:600;">
+                            📅 ${d}
+                        </div>
+                    `).join('');
+
                     tableHtml += `
-                        <tr style="background:linear-gradient(135deg, #3b82f6, #60a5fa); border-top:2px solid #2563eb; box-shadow:inset 0 1px 0 rgba(255,255,255,0.45);">
-                            <td colspan="3" style="padding:10px 12px; text-align:left; font-weight:800; color:#ffffff; text-shadow:0 1px 1px rgba(30,64,175,0.25);">Homeroom ${row.hr}</td>
+                        <tr style="border-bottom:1px solid #e2e8f0;">
+                            <td style="padding:12px; text-align:left; font-size:1rem; font-weight:700;">👤 <span style="color:#16a34a;">${row.hr}</span> <span style="color:#0f172a;">${studentDisplayHTML(row.name,row.hr)}</span></td>
+                            <td style="padding:12px; font-weight:800; color:var(--purple-color); font-size:1.05rem;">
+                                ${row.count} Unit(s)
+                            </td>
+                            <td style="padding:12px;">
+                                <button class="btn btn-inline btn-secondary" onclick="toggleDetails('${detailId}')">🔍 View Absent Units</button>
+                            </td>
+                        </tr>
+                        <tr id="${detailId}" class="hidden" style="background:#faf5ff;">
+                            <td colspan="3" style="padding:12px; text-align:left;">
+                                <div style="font-weight:700; color:#6b21a8; margin-bottom:8px;">📌 Absent Units Detailed List:</div>
+                                ${detailsListHtml}
+                            </td>
                         </tr>
                     `;
-                    displayedClass = row.hr;
-                }
-                const detailId = `absent-detail-${idx}`;
-                let detailsListHtml = (row.dates || []).map(d => `
-                    <div style="display:inline-block; padding:6px 12px; background:#fff; border:1px solid #e9d5ff; border-radius:6px; margin:4px; font-size:0.88rem; color:#6b21a8; font-weight:600;">
-                        📅 ${d}
-                    </div>
-                `).join('');
 
-                tableHtml += `
-                    <tr style="border-bottom:1px solid #e2e8f0;">
-                        <td style="padding:12px; text-align:left; font-size:1rem; font-weight:700;">👤 <span style="color:#16a34a;">${row.hr}</span> <span style="color:#0f172a;">${studentDisplayHTML(row.name,row.hr)}</span></td>
-                        <td style="padding:12px; font-weight:800; color:var(--purple-color); font-size:1.05rem;">
-                            ${row.count} Unit(s)
-                        </td>
-                        <td style="padding:12px;">
-                            <button class="btn btn-inline btn-secondary" onclick="toggleDetails('${detailId}')">🔍 View Absent Units</button>
-                        </td>
-                    </tr>
-                    <tr id="${detailId}" class="hidden" style="background:#faf5ff;">
-                        <td colspan="3" style="padding:12px; text-align:left;">
-                            <div style="font-weight:700; color:#6b21a8; margin-bottom:8px;">📌 Absent Units Detailed List:</div>
-                            ${detailsListHtml}
-                        </td>
-                    </tr>
-                `;
+                    if (!absentList[idx + 1] || absentList[idx + 1].hr !== row.hr) {
+                        tableHtml += `
+                            <tr style="background:#f3e8ff; border-bottom:2px solid #d8b4fe;">
+                                <td colspan="3" style="padding:10px 12px; text-align:left; font-weight:800; color:#6b21a8;"><span style="color:#16a34a;">${row.hr}</span> Absent: ${classCounts[row.hr]}</td>
+                            </tr>
+                        `;
+                    }
+                });
+            }
 
-                if (!absentList[idx + 1] || absentList[idx + 1].hr !== row.hr) {
-                    tableHtml += `
-                        <tr style="background:#f3e8ff; border-bottom:2px solid #d8b4fe;">
-                            <td colspan="3" style="padding:10px 12px; text-align:left; font-weight:800; color:#6b21a8;"><span style="color:#16a34a;">${row.hr}</span> Absent: ${classCounts[row.hr]}</td>
-                        </tr>
-                    `;
-                }
-            });
+            tableHtml += `</tbody></table></div>`;
         }
 
-        tableHtml += `</tbody></table></div></div>`;
+        tableHtml += `</div>`;
         container.innerHTML = tableHtml;
     }
 
@@ -2496,8 +2519,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 await downloadExcelBuffer(await workbook.xlsx.writeBuffer(), `Absent_List_By_Unit_${stamp}.xlsx`);
             }
 
-            // File 2: per student — Total Absent Units + each absent unit/date
-            if(students.length) {
+            // File 2: only when Total Absent Units per Student was requested
+            if(data.includeTotalPerStudent && students.length) {
                 // Brief pause so browsers allow the second download
                 await new Promise(resolve=>setTimeout(resolve, 400));
                 const workbook=new library.Workbook();
