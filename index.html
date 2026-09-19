@@ -871,7 +871,7 @@
 <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
     import { getAuth, signInAnonymously, GoogleAuthProvider, signInWithPopup, signOut, setPersistence, browserSessionPersistence } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
-    import { getFirestore, runTransaction as firestoreTransaction, doc, setDoc as firestoreSetDoc, getDoc, getDocFromServer, collection, query, where, getDocs, getDocsFromServer, writeBatch as firestoreBatch } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+    import { getFirestore, runTransaction as firestoreTransaction, doc, setDoc as firestoreSetDoc, getDoc, getDocFromServer, collection, query, where, getDocs, getDocsFromServer, writeBatch as firestoreBatch, deleteField } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
 
     const firebaseConfig = {
         apiKey: "AIzaSyAbpAnc5Ub9mGGm5kUgP3jCKXwAnZONwrE",
@@ -1768,11 +1768,22 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 const prior=snap.data();
                 if(prior.hasParticipation) throw new Error('This unit can no longer be turned off because a student has started the exam.');
                 const state={...prior,book,unit,isOpen:false,generateMakeupCode:false,allowNoCodeMakeup:false,
-                    scheduleEnabled:false,startsAt:null,endsAt:null,startMs:null,endMs:null,
-                    openedDate:null,makeupSessionId:null,
+                    scheduleEnabled:false,availabilityHistory:[],
                     updatedAt:new Date().toISOString()};
+                // Remove schedule timestamps so the unit is fully closed (no residual window / makeup eligibility).
+                state.startsAt=deleteField();
+                state.endsAt=deleteField();
+                state.startMs=deleteField();
+                state.endMs=deleteField();
+                state.openedDate=deleteField();
+                state.makeupSessionId=deleteField();
                 transaction.set(unitRef,state);
-                return state;
+                // Local cache without FieldValue sentinels
+                const local={...prior,book,unit,isOpen:false,generateMakeupCode:false,allowNoCodeMakeup:false,
+                    scheduleEnabled:false,availabilityHistory:[],updatedAt:state.updatedAt};
+                delete local.startsAt; delete local.endsAt; delete local.startMs; delete local.endMs;
+                delete local.openedDate; delete local.makeupSessionId;
+                return local;
             });
             unitStates[key]=saved;
             drawUnits();
@@ -1881,17 +1892,21 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 const card=document.createElement('div');card.className='unit-card'+(book===selectedBook && unit===selectedUnit ? ' selected':'');
                 card.innerHTML=`<div class="unit-heading"><button class="unit-name ${displayOpen ? 'open':''}">${icon}Unit${String(unit).padStart(2,'0')}</button>${isAdmin ? `<button class="unit-switch" role="switch" aria-label="${unitLabel(book,unit)}" aria-checked="${state.isOpen===true}">${['scheduled','active'].includes(examPhase(state)) ? 'On' : 'Off'}</button>` : ''}</div><div class="unit-date"></div>`;
                 const dates=card.querySelector('.unit-date');
-                if(isAdmin) {
-                    for(const entry of availabilityHistory(state)) {
-                        const pair=document.createElement('div');
-                        pair.textContent=scheduleLabel({...state,isOpen:true,availabilityHistory:[entry]});
-                        // Legacy date-only entries have no saved time; interpret their day in UTC+08.
-                        const start=Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(entry.startsAt)
-                            ? `${entry.startsAt}T00:00:00+08:00` : entry.startsAt);
-                        pair.style.color=examPhase(state)==='active' ? '#16a34a' : '#94a3b8';
-                        dates.appendChild(pair);
+                if(state.isOpen===true) {
+                    if(isAdmin) {
+                        for(const entry of availabilityHistory(state)) {
+                            const pair=document.createElement('div');
+                            pair.textContent=scheduleLabel({...state,isOpen:true,availabilityHistory:[entry]});
+                            pair.style.color=examPhase(state)==='active' ? '#16a34a' : '#94a3b8';
+                            dates.appendChild(pair);
+                        }
+                    } else {
+                        dates.textContent=permitted ? scheduleLabel({...state,isOpen:true}) : '';
+                        dates.style.color=examPhase(state)==='active' ? '#16a34a' : '#94a3b8';
                     }
-                } else {dates.textContent=permitted ? scheduleLabel({...state,isOpen:true}) : '';dates.style.color=examPhase(state)==='active' ? '#16a34a' : '#94a3b8';}
+                } else {
+                    dates.textContent='';
+                }
                 card.onclick=()=> {
                     selectedBook=book;selectedUnit=unit;
                     // Keep the clicked element alive so the browser can detect a double click.
