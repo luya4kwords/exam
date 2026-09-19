@@ -550,6 +550,16 @@
             margin-bottom: 20px;
         }
 
+        .btn-refresh-soft {
+            background: #E0F2FE;
+            color: #0284C7;
+            border: 1px solid #0284C7;
+            box-shadow: 0 2px 5px rgba(2,132,199,0.08);
+            margin: 0;
+        }
+        .btn-refresh-soft:hover { background: #BAE6FD; color: #0369A1; }
+        .btn-refresh-soft:focus-visible { outline: 2px solid #0284C7; outline-offset: 3px; }
+
         .score-display {
             text-align: center; padding: 24px; background: linear-gradient(135deg, #4f46e5, #312e81);
             color: white; border-radius: 12px; margin-bottom: 24px;
@@ -624,6 +634,7 @@
                 <div class="admin-database-buttons">
                     <button id="btn-backup-database" class="btn btn-inline btn-blue-grad" onclick="backupDatabase()">💾 Backup Database</button>
                     <button id="btn-restore-database" class="btn btn-inline btn-emerald-grad" onclick="requestDatabaseRestore()">↩ Restore Database</button>
+                    <button id="btn-prepare-reports" class="btn btn-inline btn-secondary" onclick="prepareReportData()">Prepare Report Data (up to 1,000)</button>
                 </div>
                 <input id="restore-file" type="file" accept=".json,application/json" hidden onchange="restoreDatabase(this)">
             </div>
@@ -665,7 +676,8 @@
 
 
             <div class="admin-btn-grid">
-                <button class="btn btn-blue-grad admin-action-btn" onclick="loadAdminStudentRecords()">📚 Unit Records</button>
+                <button id="btn-refresh-admin" class="btn admin-action-btn btn-refresh-soft" onclick="refreshAdminData()">↻ Refresh Data</button>
+                <button class="btn btn-blue-grad admin-action-btn" style="grid-column:1;" onclick="loadAdminStudentRecords()">📚 Unit Records</button>
                 <button class="btn btn-blue-grad admin-action-btn" onclick="calculateWeeklyLeaderboard()">🏆 Weekly Ranking</button>
                 <button class="btn btn-blue-grad admin-action-btn" onclick="openCustomRangeModal()">🗓️ Custom Ranking</button>
                 
@@ -674,10 +686,6 @@
                 <button class="btn btn-emerald-grad admin-action-btn" onclick="openScoreHistoryModal()">🔍👤 View Score History</button>
             </div>
 
-            <div style="display:flex;flex-wrap:wrap;gap:8px;margin:12px 0;">
-                <button id="btn-refresh-admin" class="btn btn-inline btn-secondary" onclick="refreshAdminData()">Refresh Data</button>
-                <button id="btn-prepare-reports" class="btn btn-inline btn-secondary" onclick="prepareReportData()">Prepare Report Data (up to 1,000)</button>
-            </div>
             <p id="admin-read-status" class="status-msg">Reports share cached data during this login. Refresh Data loads new submissions. First use: prepare legacy report data.</p>
             <p id="admin-sync-status" class="status-msg" aria-live="polite"></p>
             <div id="records-list"></div>
