@@ -772,7 +772,6 @@
                 <div><select id="unit-end-hour" aria-label="End hour"></select> : <select id="unit-end-minute" aria-label="End minute"></select></div></div>
             </div>
         </fieldset>
-        <p id="unit-schedule-notice" role="status"></p>
         <fieldset class="unit-section makeup-section">
             <legend>Make-up Exam</legend>
             <label><input id="makeup-mode-code" name="makeup-mode" type="radio" value="code"> Generate Make-up Code</label>
@@ -788,6 +787,7 @@
             <legend>Eligible Classes</legend>
             <div id="unit-class-options" style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;max-height:280px;overflow-y:auto;"></div>
         </fieldset>
+        <p id="unit-schedule-notice" role="status"></p>
         <div class="modal-btn-row">
             <button id="unit-class-cancel" class="btn btn-secondary" onclick="closeUnitClasses()">Cancel</button>
             <button id="unit-class-confirm" class="btn" onclick="confirmUnitClasses()">Save</button>
@@ -1890,9 +1890,10 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 ? 'This unit has exam participants. The schedule can no longer be changed.'
                 : 'You can change the schedule if no students have started or completed the exam. Saving will replace the previous start and end times.';
             const notice=document.getElementById('unit-schedule-notice');
-            if(locked) document.getElementById('unit-class-options').after(notice);
-            else document.querySelector('#modal-unit-classes fieldset.makeup-section').before(notice);
-            closeButton.parentElement.style.marginTop='';
+            // Always place notice outside the section boxes, directly above the action buttons.
+            closeButton.parentElement.before(notice);
+            notice.style.margin='12px 0 0';
+            closeButton.parentElement.style.marginTop='12px';
             void showSharedMakeupCode();
             document.getElementById('unit-class-confirm').textContent='Save';
             document.getElementById('modal-unit-classes').classList.remove('hidden');
