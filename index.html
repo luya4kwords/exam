@@ -2318,8 +2318,9 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             totalPerStudent: (absentList || []).map(row => ({
                 hr: row.hr,
                 name: row.name,
+                label: `${row.hr} ${studentDisplayName(row.name, row.hr)}`.trim(),
                 absentUnits: row.count,
-                details: (row.dates || []).join('; ')
+                dates: row.dates || []
             }))
         };
         const exportAttr = encodeURIComponent(JSON.stringify(exportPayload));
@@ -2447,58 +2448,91 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         container.innerHTML = tableHtml;
     }
 
+    async function downloadExcelBuffer(buffer, filename) {
+        const url=URL.createObjectURL(new Blob([buffer],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));
+        const link=document.createElement('a');
+        link.href=url;link.download=filename;
+        document.body.appendChild(link);link.click();link.remove();
+        setTimeout(()=>URL.revokeObjectURL(url),30000);
+    }
     async function exportAbsentListExcel(button) {
         if(!isAdmin || button.disabled) return;
         button.disabled=true;
         try {
             const data=JSON.parse(decodeURIComponent(button.dataset.absent));
             const units=data.unitStats || [];
-            if(!units.length) {alert('No absence data to export.');return;}
+            const students=data.totalPerStudent || [];
+            if(!units.length && !students.length) {alert('No absence data to export.');return;}
             const library=await loadExcelExportLibrary();
-            const workbook=new library.Workbook();
-            workbook.creator='LUYA';
-            const sheet=workbook.addWorksheet('Absent List');
-            // Header: one column per unit (Book5 / Unit01, ...)
-            sheet.addRow(units.map(u=>u.unit));
-            sheet.getRow(1).font={name:'Arial',size:11,bold:true};
-            sheet.getRow(1).alignment={horizontal:'center',vertical:'middle',wrapText:true};
-            const maxRows=Math.max(0, ...units.map(u=>(u.students || []).length));
-            for(let i=0;i<maxRows;i++) {
-                const row=units.map(u=>{
-                    const student=(u.students || [])[i];
-                    if(!student) return '';
-                    return student.label || `${student.hr} ${student.name}`.trim();
-                });
-                sheet.addRow(row);
-            }
-            sheet.eachRow((row, rowNumber)=>{
-                row.height=rowNumber===1 ? 28 : 20;
-                for(let col=1;col<=units.length;col++) {
-                    const cell=row.getCell(col);
-                    cell.font={name:'Arial',size:10,bold:rowNumber===1};
-                    cell.alignment={horizontal:'left',vertical:'middle',wrapText:true};
-                    const edge={style:'thin',color:{argb:'FF000000'}};
-                    cell.border={top:edge,bottom:edge,left:edge,right:edge};
-                }
-            });
-            units.forEach((_, index)=>{
-                sheet.getColumn(index+1).width=28;
-            });
-            sheet.views=[{state:'frozen',ySplit:1}];
-            const buffer=await workbook.xlsx.writeBuffer();
-            const url=URL.createObjectURL(new Blob([buffer],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));
-            const link=document.createElement('a');
             const stamp=new Date().toISOString().slice(0,10);
-            link.href=url;link.download=`Absent_List_${stamp}.xlsx`;
-            document.body.appendChild(link);link.click();link.remove();
-            setTimeout(()=>URL.revokeObjectURL(url),30000);
+            const edge={style:'thin',color:{argb:'FF000000'}};
+
+            // File 1: one column per unit (existing format)
+            if(units.length) {
+                const workbook=new library.Workbook();
+                workbook.creator='LUYA';
+                const sheet=workbook.addWorksheet('Absent List');
+                sheet.addRow(units.map(u=>u.unit));
+                const maxRows=Math.max(0, ...units.map(u=>(u.students || []).length));
+                for(let i=0;i<maxRows;i++) {
+                    sheet.addRow(units.map(u=>{
+                        const student=(u.students || [])[i];
+                        if(!student) return '';
+                        return student.label || `${student.hr} ${student.name}`.trim();
+                    }));
+                }
+                sheet.eachRow((row, rowNumber)=>{
+                    row.height=rowNumber===1 ? 28 : 20;
+                    for(let col=1;col<=units.length;col++) {
+                        const cell=row.getCell(col);
+                        cell.font={name:'Arial',size:10,bold:rowNumber===1};
+                        cell.alignment={horizontal:'left',vertical:'middle',wrapText:true};
+                        cell.border={top:edge,bottom:edge,left:edge,right:edge};
+                    }
+                });
+                units.forEach((_, index)=>{sheet.getColumn(index+1).width=28;});
+                sheet.views=[{state:'frozen',ySplit:1}];
+                await downloadExcelBuffer(await workbook.xlsx.writeBuffer(), `Absent_List_By_Unit_${stamp}.xlsx`);
+            }
+
+            // File 2: per student — Total Absent Units + each absent unit/date
+            if(students.length) {
+                // Brief pause so browsers allow the second download
+                await new Promise(resolve=>setTimeout(resolve, 400));
+                const workbook=new library.Workbook();
+                workbook.creator='LUYA';
+                const sheet=workbook.addWorksheet('Total Absent Units');
+                const maxAbsent=Math.max(0, ...students.map(s=>(s.dates || []).length));
+                const headers=['name','Total Absent Units', ...Array.from({length:maxAbsent},()=>'Absent Units')];
+                sheet.addRow(headers);
+                students.forEach(s=>{
+                    const label=s.label || `${s.hr} ${s.name}`.trim();
+                    const dates=s.dates || [];
+                    sheet.addRow([label, s.absentUnits, ...dates]);
+                });
+                sheet.eachRow((row, rowNumber)=>{
+                    row.height=rowNumber===1 ? 28 : 20;
+                    const colCount=headers.length;
+                    for(let col=1;col<=colCount;col++) {
+                        const cell=row.getCell(col);
+                        cell.font={name:'Arial',size:10,bold:rowNumber===1};
+                        cell.alignment={horizontal:col===2 ? 'center' : 'left',vertical:'middle',wrapText:true};
+                        cell.border={top:edge,bottom:edge,left:edge,right:edge};
+                    }
+                });
+                sheet.getColumn(1).width=28;
+                sheet.getColumn(2).width=18;
+                for(let col=3;col<=headers.length;col++) sheet.getColumn(col).width=32;
+                sheet.views=[{state:'frozen',ySplit:1}];
+                await downloadExcelBuffer(await workbook.xlsx.writeBuffer(), `Absent_List_Per_Student_${stamp}.xlsx`);
+            }
         } catch(error) {
             alert(`Excel export failed: ${error.message}`);
         } finally {
             button.disabled=false;
         }
     }
-    window.exportAbsentListExcel=exportAbsentListExcel;
+        window.exportAbsentListExcel=exportAbsentListExcel;
 
     /* Score History Functions */
     function populateHistoryClassOptions() {
