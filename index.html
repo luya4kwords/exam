@@ -674,6 +674,11 @@
                 <button class="btn btn-emerald-grad admin-action-btn" onclick="openScoreHistoryModal()">🔍👤 View Score History</button>
             </div>
 
+            <div style="display:flex;flex-wrap:wrap;gap:8px;margin:12px 0;">
+                <button id="btn-refresh-admin" class="btn btn-inline btn-secondary" onclick="refreshAdminData()">Refresh Data</button>
+                <button id="btn-prepare-reports" class="btn btn-inline btn-secondary" onclick="prepareReportData()">Prepare Report Data (up to 1,000)</button>
+            </div>
+            <p id="admin-read-status" class="status-msg">Reports share cached data during this login. Refresh Data loads new submissions. First use: prepare legacy report data.</p>
             <p id="admin-sync-status" class="status-msg" aria-live="polite"></p>
             <div id="records-list"></div>
         </div>
@@ -871,7 +876,7 @@
 <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
     import { getAuth, signInAnonymously, GoogleAuthProvider, signInWithPopup, signOut, setPersistence, browserSessionPersistence } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
-    import { getFirestore, runTransaction as firestoreTransaction, doc, setDoc as firestoreSetDoc, getDoc, getDocFromServer, collection, query, where, getDocs, getDocsFromServer, writeBatch as firestoreBatch, deleteField, serverTimestamp, Timestamp, GeoPoint } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+    import { getFirestore, runTransaction as firestoreTransaction, doc, setDoc as firestoreSetDoc, getDoc, getDocFromServer, collection, query, where, getDocs, getDocsFromServer, writeBatch as firestoreBatch, deleteField, serverTimestamp, Timestamp, GeoPoint, orderBy, documentId, startAfter, limit } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
 
     const firebaseConfig = {
         apiKey: "AIzaSyAbpAnc5Ub9mGGm5kUgP3jCKXwAnZONwrE",
@@ -886,43 +891,74 @@
     const app = initializeApp(firebaseConfig);
     const db = getFirestore(app);
     const auth = getAuth(app);
-    // Cache completed reads for one minute, and share concurrent requests.
+    // Administrator reports share a login-session snapshot until Refresh is requested.
+    // Admission and submission still use fresh server reads/transactions.
     const readCache=new Map();
     const READ_CACHE_MS=60000;
-    function invalidateReads() {readCache.clear();}
-    async function cachedRead(key,fetcher,force=false) {
-        const old=readCache.get(key);
-        if(old && !force && (old.pending || Date.now()-old.time<READ_CACHE_MS))return old.promise;
-        const entry={pending:true,time:0};
-        entry.promise=Promise.resolve().then(fetcher).then(value=>{entry.pending=false;entry.time=Date.now();return value;},error=>{if(readCache.get(key)===entry)readCache.delete(key);throw error;});
-        readCache.set(key,entry);return entry.promise;
+    function invalidateReads(names=null) {
+        if(!names){readCache.clear();return;}
+        const affected=new Set(names);
+        for(const [key,entry] of readCache)if(entry.names.some(n=>affected.has(n)))readCache.delete(key);
     }
-    async function runTransaction(...args) {const result=await firestoreTransaction(...args);invalidateReads();return result;}
-    async function setDoc(...args) {const result=await firestoreSetDoc(...args);invalidateReads();return result;}
+    function readDependencies(key) {
+        if(key.startsWith('all:'))return [key.slice(4)];
+        if(key.startsWith('unit-state:'))return ['examUnits'];
+        try{const parsed=JSON.parse(key);return [parsed[1]];}catch{return [];}
+    }
+    async function cachedRead(key,fetcher,force=false,names=readDependencies(key)) {
+        const scope=(isAdmin?'admin':`student:${currentUserHR}:${currentUser}`)+':'+key;
+        const old=readCache.get(scope);
+        if(old && (old.pending || (!force && (isAdmin || Date.now()-old.time<READ_CACHE_MS))))return old.promise;
+        const entry={pending:true,time:0,names};
+        entry.promise=Promise.resolve().then(fetcher).then(value=>{
+            entry.pending=false;entry.time=Date.now();
+            const status=document.getElementById('admin-read-status');
+            if(isAdmin&&status)status.textContent='Last cloud read: '+new Date(entry.time).toLocaleTimeString()+'. Reports reuse cached data; use Refresh Data for new submissions.';
+            return value;
+        },error=>{if(readCache.get(scope)===entry)readCache.delete(scope);throw error;});
+        readCache.set(scope,entry);return entry.promise;
+    }
+    function referenceCollection(ref){return ref.path?.split('/')[0] || ref.col;}
+    async function runTransaction(database,callback,...options) {
+        const touched=new Set();
+        const result=await firestoreTransaction(database,transaction=>callback(new Proxy(transaction,{
+            get(target,key){
+                const value=target[key];
+                if(['set','update','delete'].includes(key))return (ref,...args)=>{touched.add(referenceCollection(ref));return value.call(target,ref,...args);};
+                return typeof value==='function'?value.bind(target):value;
+            }
+        })),...options);
+        invalidateReads([...touched]);return result;
+    }
+    async function setDoc(ref,...args) {const result=await firestoreSetDoc(ref,...args);invalidateReads([referenceCollection(ref)]);return result;}
     function writeBatch(...args) {
-        const batch=firestoreBatch(...args),commit=batch.commit.bind(batch);
-        batch.commit=async()=>{const result=await commit();invalidateReads();return result;};return batch;
+        const batch=firestoreBatch(...args),commit=batch.commit.bind(batch),touched=new Set();
+        for(const method of ['set','update','delete']) {
+            const original=batch[method].bind(batch);
+            batch[method]=(ref,...values)=>{touched.add(referenceCollection(ref));return original(ref,...values);};
+        }
+        batch.commit=async()=>{const result=await commit();invalidateReads([...touched]);return result;};return batch;
     }
     function cachedCollection(name,force=false) {
+        if(isAdmin && ['records','examStarts','attemptDrafts'].includes(name))throw Error('Full history reads are reserved for explicit backup or data preparation. Choose a report filter.');
         return cachedRead('all:'+name,()=>getDocsFromServer(collection(db,name)),force);
     }
+    function filteredDocuments(name,filters,force=false) {
+        const normalized=[...filters].sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)));
+        return cachedRead(JSON.stringify(['query',name,normalized]),()=>getDocsFromServer(query(collection(db,name),...normalized.map(f=>where(...f)))),force);
+    }
     function studentDocuments(name,studentName=currentUser,hr=currentUserHR,force=false) {
-        // The roster supplies the canonical name used when records are created.
-        return cachedRead(JSON.stringify(['student',name,studentName,hr]),()=>getDocsFromServer(query(collection(db,name),where('studentName','==',studentName),where('studentHR','==',hr))),force);
+        return filteredDocuments(name,[['studentName','==',studentName],['studentHR','==',hr]],force);
     }
     function unitDocuments(name,unitId,force=false) {
-        const match=/^B([1-6])U(\d{2})$/.exec(unitId);
-        if(!match)throw new Error('Invalid Unit');
-        return cachedRead(JSON.stringify(['unit',name,unitId]),async()=>{
-            // Read only this Unit. The second query includes old book/unit-only records.
-            const snapshots=await Promise.all([
-                getDocsFromServer(query(collection(db,name),where('unitId','==',unitId))),
-                getDocsFromServer(query(collection(db,name),where('book','==',Number(match[1])),where('unit','==',Number(match[2]))))
-            ]);
-            const docs=[...new Map(snapshots.flatMap(snap=>snap.docs).map(d=>[d.id,d])).values()];
-            return {docs,forEach:fn=>docs.forEach(fn)};
-        },force);
+        if(!/^B([1-6])U(\d{2})$/.test(unitId))throw Error('Invalid Unit');
+        return filteredDocuments(name,[['unitId','==',unitId]],force);
     }
+    function combineDocuments(snapshots) {
+        const docs=[...new Map(snapshots.flatMap(s=>s.docs).map(d=>[d.id,d])).values()];
+        return {docs,forEach:fn=>docs.forEach(fn)};
+    }
+
     const ADMIN_EMAILS = ['huang@luya.academy', 'owenchin@luya.academy', 'jacklee@luya.academy', 'keyeslee@luya.academy'];
     const isAllowedAdmin = user => user?.emailVerified === true && ADMIN_EMAILS.includes(user.email?.toLowerCase());
     const authReady = setPersistence(auth, browserSessionPersistence);
@@ -943,7 +979,7 @@
                 await signOut(auth);
                 throw new Error('此 Google 帳號未被授權為題庫管理員。');
             }
-            isAdmin=true;currentUser='Administrator';currentUserHR='';
+            invalidateReads();lastAdminReport=null;isAdmin=true;currentUser='Administrator';currentUserHR='';
             selectedBook=null;selectedUnit=null;
             document.getElementById('records-list').textContent='Please select a unit to view its records.';
             document.getElementById('user-role-icon').innerText='⚙️';
@@ -991,7 +1027,8 @@
                 }
                 saved.details=saved.details.map(d=>({...d,...(changes.find(c=>c.id===d.id)||{})}));
                 saved.correctedAt=recordData.correctedAt;
-                transaction.update(ref,{details:saved.details,correctedAt:saved.correctedAt});
+                saved.needsCorrection=recordDetails(saved).some(d=>!d.isCorrect);
+                transaction.update(ref,{details:saved.details,correctedAt:saved.correctedAt,needsCorrection:saved.needsCorrection});
                 return {...saved,recordId:recordData.recordId};
             }
             if(existing.exists() && !existing.data().answerDataUnavailable)return {...existing.data(),recordId:recordData.recordId};
@@ -1009,6 +1046,7 @@
             if(a.serverStartedAt)saved.serverStartedAt=a.serverStartedAt;
             if(Date.now()>=attemptDeadline(saved) && saved.submissionReason!=='fullscreen_exit')finalizeAutomaticSubmission(saved,'time_limit');
             saved.status='completed';saved.answerDataUnavailable=false;
+            Object.assign(saved,reportFields(saved));
             transaction.set(ref,saved);
             transaction.update(startRef,{status:'completed'});
             return saved;
@@ -1149,7 +1187,7 @@
         if(savingResult)return;
         if(isExamActive && !confirm('Leave this exam? Saved answers will be retained; the timer will continue.'))return;
         saveCurrentAnswer();savePageSession();
-        if(isExamActive && !isCorrectionMode)await flushDraft();
+        if(isExamActive && !isCorrectionMode)await flushDraft(true);
         leavingSession=true;
         try { await signOut(auth); } catch(error) {leavingSession=false;alert('Unable to sign out. Please try again.');return;}
         sessionStorage.removeItem(SESSION_KEY);
@@ -1263,7 +1301,7 @@
 
         if (matchedStudent) {
             try {await ensureStudentSession();await bindStudentName(matchedStudent.name,matchedStudent.hr);} catch(error) {alert('Unable to open your student session. Check the connection and updated Firestore rules.');return;}
-            isAdmin = false;
+            invalidateReads();lastAdminReport=null;isAdmin = false;
             currentUser = matchedStudent.name;
             currentUserHR = matchedStudent.hr;
             unitRecords=[];examStarts=[];unitRecordsLoaded=false;startsLoaded=false;
@@ -1298,7 +1336,7 @@
         else if(/Windows/.test(ua)) operatingSystem='Windows';
         else if(/Macintosh|Mac OS X/.test(ua)) operatingSystem='macOS';
         else if(/Linux/.test(ua)) operatingSystem='Linux';
-        return {browserName,browserVersion,operatingSystem,userAgent:ua,appVersion:'2026-09-19-reliability-2',capturedAt:new Date().toISOString()};
+        return {browserName,browserVersion,operatingSystem,userAgent:ua,appVersion:'2026-09-20-read-efficient-3',capturedAt:new Date().toISOString()};
     }
 
     let unitStates = {}, unitRecords = [], activeRecord = null, activeUnit = null;
@@ -1482,7 +1520,9 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     }
     async function refreshExamStarts(force=false,unitId=null) {
         const owner=String(isAdmin)+':'+currentUserHR+':'+currentUser;
-        const snap=isAdmin ? (unitId ? await unitDocuments('examStarts',unitId,force) : await cachedCollection('examStarts',force)) : await studentDocuments('examStarts',currentUser,currentUserHR,force);
+        if(isAdmin && !unitId)return;
+        if(isAdmin)await ensureReportFields(force);
+        const snap=isAdmin ? await unitDocuments('examStarts',unitId,force) : await studentDocuments('examStarts',currentUser,currentUserHR,force);
         if(owner!==String(isAdmin)+':'+currentUserHR+':'+currentUser)return;
         const rows=snap.docs.map(d=>({...d.data(),id:d.id}));
         examStarts=unitId ? [...examStarts.filter(a=>unitKey(a.book,a.unit)!==unitId),...rows] : rows;
@@ -1490,26 +1530,18 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     }
     async function refreshPolicyData(force=false) {
         const owner=String(isAdmin)+':'+currentUserHR+':'+currentUser;
-        const [states,records]=await Promise.all([cachedCollection('examUnits',force),isAdmin ? cachedCollection('records',force) : studentDocuments('records',currentUser,currentUserHR,force),refreshExamStarts(force)]);
+        if(isAdmin) {
+            const states=await cachedCollection('examUnits',force);
+            if(owner!==String(isAdmin)+':'+currentUserHR+':'+currentUser)return;
+            unitStates=Object.fromEntries(states.docs.map(d=>[d.id,d.data()]));unitStatesLoaded=true;
+            return;
+        }
+        const [states,records]=await Promise.all([cachedCollection('examUnits',force),studentDocuments('records',currentUser,currentUserHR,force),refreshExamStarts(force)]);
         if(owner!==String(isAdmin)+':'+currentUserHR+':'+currentUser)return;
         unitStates=Object.fromEntries(states.docs.map(d=>[d.id,d.data()]));
-        unitRecords=records.docs.map(d=>({...d.data(),recordId:d.id}));
-        unitStatesLoaded=unitRecordsLoaded=true;
-        await finalizeExpiredAttempts();
-        if(isAdmin) {
-            const batch=writeBatch(db);let changed=false;
-            for(const [key,value] of Object.entries(unitStates)) {
-                const window=examWindow(value);
-                if(!window) continue;
-                const patch={};
-                if(value.startMs!==window.start || value.endMs!==window.end) {patch.startMs=window.start;patch.endMs=window.end;}
-                if(!value.examClasses) patch.examClasses=value.allowedClasses || [];
-                if(!value.hasParticipation && hasParticipation({...value,unitId:key},unitRecords,examStarts)) patch.hasParticipation=true;
-                if(Object.keys(patch).length) {batch.update(doc(db,'examUnits',key),patch);Object.assign(value,patch);changed=true;}
-            }
-            if(changed) await batch.commit();
-        }
+        unitRecords=records.docs.map(d=>({...d.data(),recordId:d.id}));unitStatesLoaded=unitRecordsLoaded=true;
     }
+
     function canEnterUnit(book,unit) {
         const state=policyState(book,unit);
         return studentUnitPresentation(state,currentStudent(),unitRecords,statesForPolicy(),examStarts).blue;
@@ -1666,6 +1698,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     async function saveScheduledUnit(book,unit,classes,schedule) {
         const key=unitKey(book,unit);
         await refreshPolicyData(true);
+        await checkAdminParticipation(book,unit,true);
         const before=policyState(book,unit);
         if(!mayReplaceSchedule(before,unitRecords,examStarts) || before.hasParticipation)
             throw new Error('This schedule is locked because a student has started or completed the exam. Use make-up exams instead.');
@@ -1768,7 +1801,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         document.getElementById('unit-class-cancel').disabled=true;
         try {
             await refreshPolicyData(true);
-            const before=policyState(book,unit);
+            await checkAdminParticipation(book,unit,true);
+        const before=policyState(book,unit);
             if(before.hasParticipation || !mayReplaceSchedule(before,unitRecords,examStarts))
                 throw new Error('This unit can no longer be turned off because a student has started or completed the exam.');
             const unitRef=doc(db,'examUnits',key);
@@ -1923,7 +1957,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 if(!isAdmin) card.ondblclick=()=>{void openStudentUnit(book,unit);};
                 if (isAdmin) card.querySelector('.unit-switch').onclick=e=>{
                     e.stopPropagation();
-                    card.onclick();
+                    selectedBook=book;selectedUnit=unit;
                     void toggleUnit(book,unit,e.currentTarget);
                 };
                 grid.appendChild(card);
@@ -1934,7 +1968,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     async function toggleUnit(book,unit,button) {
         if(!isAdmin || button.disabled || savingUnitClasses) return;
         button.disabled=true;
-        try {await refreshPolicyData();} catch(error) {alert('Unable to verify exam participation. Please try again.');return;} finally {button.disabled=false;}
+        try {await refreshPolicyData();await checkAdminParticipation(book,unit);} catch(error) {alert(error.message);return;} finally {button.disabled=false;}
         const state=policyState(book,unit);
         {
             if(!populateLeaderboardClassOptions('unit-class-options')) return;
@@ -2064,6 +2098,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             return;
         }
         const targetUnit = unitKey(selectedBook,selectedUnit);
+        const reportBook=selectedBook,reportUnit=selectedUnit;
+        lastAdminReport=()=>{selectedBook=reportBook;selectedUnit=reportUnit;return loadAdminStudentRecords();};
         const container = reportSurface();
         let heading = `<div class="report-heading unit-records-heading"><h3 style="color:var(--primary-color);margin:16px 0;">📚 ${unitLabel(selectedBook,selectedUnit)} · Unit Records</h3>${reportPrintButton()}<button class="btn btn-inline btn-blue-grad unit-records-refresh" onclick="loadAdminStudentRecords(true)">Refresh</button></div>`;
         container.innerHTML = heading + '<p style="color: var(--text-muted); font-size: 0.9rem;">⏳ Loading Cloud Records...</p>';
@@ -2075,7 +2111,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             const [loadedRecords,unitSnapshot]=await Promise.all([getResultsFromCloud(targetUnit,force),cachedRead('unit-state:'+targetUnit,()=>getDocFromServer(doc(db,'examUnits',targetUnit)),force)]);
             records=loadedRecords;
             recordUnitState=unitSnapshot.exists() ? unitSnapshot.data() : {};
-        } catch(error) { container.textContent="❌ Unable to load records."; return; }
+        } catch(error) { container.textContent="❌ Unable to load records. "+error.message; return; }
         if(targetUnit !== unitKey(selectedBook,selectedUnit)) return;
         const pendingAttempts=examStarts.filter(a=>unitKey(a.book,a.unit)===targetUnit && a.status==='in_progress' && Date.now()>=attemptDeadline(a) && !records.some(r=>r.recordId===(a.recordId||a.id)));
         if(pendingAttempts.length)heading+='<div class="card-box"><strong>Expired — awaiting saved answers</strong><ul>'+pendingAttempts.map(a=>'<li>'+escapeHTML(a.studentHR)+' '+studentDisplayHTML(a.studentName,a.studentHR)+' — '+escapeHTML(taiwanDateTime(attemptDeadline(a)).replace('T',' '))+'</li>').join('')+'</ul><p>Ask these students to reopen the unit and submit their saved answers. No zero scores have been assumed.</p></div>';
@@ -2146,17 +2182,19 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
 
     async function calculateUncorrectedStudents() {
         if(!isAdmin)return;
+        lastAdminReport=()=>calculateUncorrectedStudents();
         const container = reportSurface();
         container.innerHTML = '<p style="color: var(--text-muted); font-size: 0.9rem;">⏳ Scanning all student correction records...</p>';
 
         try {
-            const querySnapshot = await cachedCollection('records');
+            await ensureReportFields();
+            const querySnapshot = await filteredDocuments('records',[['needsCorrection','==',true]]);
             let studentUncorrectedMap = {};
 
             querySnapshot.forEach((doc) => {
                 const data = doc.data();
                 if (data.studentName && data.details && Array.isArray(data.details)) {
-                    const wrongItems = data.details.filter(d => !d.isCorrect);
+                    const wrongItems = recordDetails(data).filter(d => !d.isCorrect);
                     if (wrongItems.length > 0) {
                         const name = data.studentName;
                         const hr = getStudentHR(name, data.studentHR);
@@ -2194,7 +2232,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             renderUncorrectedStudentsUI(uncorrectedList,container);
         } catch (error) {
             console.error("Uncorrected List Error:", error);
-            container.innerHTML = '<p style="color: var(--danger-color); font-size: 0.9rem;">❌ Failed to load uncorrected list. Please try again.</p>';
+            container.textContent="\u274c Failed to load uncorrected list. Please try again."+' '+error.message;
         }
     }
 
@@ -2317,8 +2355,11 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             unitBoxes.forEach(box=>{
                 box.addEventListener('change',()=>{allCb.checked=unitBoxes.length>0 && unitBoxes.every(item=>item.checked);});
             });
-            allCb.checked=true;
-            unitBoxes.forEach(box=>{box.checked=true;});
+            allCb.checked=false;
+            const latest=completedUnits.slice().sort((a,b)=>Date.parse(b.endsAt)-Date.parse(a.endsAt))[0]?.unitId;
+            const initial=completedUnits.some(u=>u.unitId===unitKey(selectedBook,selectedUnit))?unitKey(selectedBook,selectedUnit):latest;
+            unitBoxes.forEach(box=>{box.checked=box.value===initial;});
+            allCb.checked=unitBoxes.length>0&&unitBoxes.every(box=>box.checked);
             const includeTotal=document.getElementById('absent-include-total');
             if(includeTotal) includeTotal.checked=false;
             document.getElementById('modal-absent-units').classList.remove('hidden');
@@ -2327,11 +2368,12 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             document.getElementById('records-list').innerHTML='<p style="color: var(--danger-color); font-size: 0.9rem;">❌ Failed to prepare absentee list. Please try again.</p>';
         }
     }
-    async function submitAbsentUnitsSelection() {
+    async function submitAbsentUnitsSelection(savedSelection=null,savedIncludeTotal=null) {
         if(!isAdmin)return;
-        const selected=[...document.querySelectorAll('#absent-unit-options input[name="absent-unit"]:checked')].map(cb=>cb.value);
+        const selected=savedSelection || [...document.querySelectorAll('#absent-unit-options input[name="absent-unit"]:checked')].map(cb=>cb.value);
         if(!selected.length) {alert('Please select at least one unit.');return;}
-        const includeTotalPerStudent=!!document.getElementById('absent-include-total')?.checked;
+        const includeTotalPerStudent=savedIncludeTotal ?? !!document.getElementById('absent-include-total')?.checked;
+        lastAdminReport=()=>submitAbsentUnitsSelection([...selected],includeTotalPerStudent);
         closeAbsentUnitsModal();
         const container=reportSurface();
         container.innerHTML='<p style="color: var(--text-muted); font-size: 0.9rem;">⏳ Scanning absentee records for selected units...</p>';
@@ -2339,6 +2381,8 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             await refreshPolicyData();
             const states=statesForPolicy();
             const selectedStates=states.filter(state=>selected.includes(state.unitId));
+            const scoped=await loadAdminUnitData(selected);
+            const unitRecords=scoped.records,examStarts=scoped.starts;
             const unitStats=selectedStates.map(state=>{
                 const absentees=[];
                 studentDirectory.forEach(student=>{
@@ -2379,7 +2423,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             renderAbsentStudentsUI(absentList, unitStats, includeTotalPerStudent,container);
         } catch(error) {
             console.error('Absent List Error:', error);
-            container.innerHTML='<p style="color: var(--danger-color); font-size: 0.9rem;">❌ Failed to load absentee list. Please try again.</p>';
+            container.textContent='Unable to load absentee list. '+error.message;
         }
     }
     window.submitAbsentUnitsSelection=submitAbsentUnitsSelection;
@@ -2732,11 +2776,12 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
 
     async function fetchAndRenderStudentHistory(searchName, startStr, endStr, selectedClass) {
         if(!isAdmin)return;
+        lastAdminReport=()=>fetchAndRenderStudentHistory(searchName,startStr,endStr,selectedClass);
         const container = reportSurface();
         container.innerHTML = `<p style="color: var(--text-muted); font-size: 0.9rem;">⏳ Searching score history for "${escapeHTML(selectedClass)} ${studentDisplayHTML(searchName,selectedClass)}" (${startStr} ~ ${endStr})...</p>`;
 
         try {
-            const querySnapshot = await cachedCollection('records');
+            const querySnapshot = await historyDocuments(searchName,selectedClass,startStr,endStr);
             const normalizedSearch = normalizeLoginValue(searchName);
 
             let matchedRecords = [];
@@ -2829,7 +2874,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             container.innerHTML = summaryHtml + printRecordSummary(matchedRecords, true) + recordsHtml;
         } catch (error) {
             console.error("Score History Search Error:", error);
-            container.innerHTML = '<p style="color: var(--danger-color); font-size: 0.9rem;">❌ Failed to load score history. Please try again.</p>';
+            container.textContent="\u274c Failed to load score history. Please try again."+' '+error.message;
         }
     }
 
@@ -2947,12 +2992,13 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
 
     async function calculateRangeLeaderboard(startStr, endStr, titleText, selectedClasses) {
         if(!isAdmin)return;
+        const reportClasses=[...selectedClasses];lastAdminReport=()=>calculateRangeLeaderboard(startStr,endStr,titleText,reportClasses);
         const container = reportSurface();
         container.innerHTML = `<p style="color: var(--text-muted); font-size: 0.9rem;">⏳ Calculating ranking data from ${startStr} to ${endStr}...</p>`;
 
         try {
             const [querySnapshot, unitSnapshot] = await Promise.all([
-                cachedCollection('records'), cachedCollection('examUnits')
+                rankingDocuments(startStr,endStr,selectedClasses), cachedCollection('examUnits')
             ]);
             let studentScores = {};
             const rankingUnits = new Set();
@@ -3014,7 +3060,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             renderRangeLeaderboardUI(startStr, endStr, leaderboard, titleText, [...rankingUnits],container);
         } catch (error) {
             console.error("Leaderboard Error:", error);
-            container.innerHTML = '<p style="color: var(--danger-color); font-size: 0.9rem;">❌ Failed to load leaderboard. Please try again.</p>';
+            container.textContent="\u274c Failed to load leaderboard. Please try again."+' '+error.message;
         }
     }
 
@@ -3567,7 +3613,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             activeRecord.lastDepartureAt=new Date().toISOString();
         }
         saveCurrentAnswer();
-        savePageSession();void flushDraft();
+        savePageSession();void flushDraft(true);
         if(examGuard.count<=2) {
             guardMessage('⚠️ Warning '+examGuard.count+' of 2: '+reason+'\n\nYour exam has not been submitted. '+(examGuard.count===1 ? 'You have one warning remaining.' : 'This is your final warning. The next departure will automatically submit your exam. Answered questions will be graded normally.')+'\n\nClick “Enter Fullscreen” to continue your exam.');
         } else {
@@ -4155,6 +4201,7 @@ window.exportWeeklyWord=async button=>{
             const counts=BACKUP_COLLECTIONS.map(name=>`${escapeHTML(name)}: ${current.counts[name]} → ${backup.counts[name]}`).join('\n');
             if(!await confirmDatabaseWarning(`⚠️ Warning: Restore database to backup dated ${new Date(backup.completedAt).toLocaleString()}?\n\n${counts}\n\n${deletions} documents not in the backup will be DELETED. Matching documents will be REPLACED.\n\nBefore continuing, stop all students and other administrators from using the site. A safety backup will be downloaded before changes begin. Large restores run in batches and can partially complete if interrupted.\n\nContinue with full replacement?`)) {await setMaintenance(false);status.textContent='Restore cancelled. Database unchanged.';return;}
             downloadSafetyBackup(current);
+            await setDoc(doc(db,'system','reportIndex'),{version:1,status:'preparing',phase:'records',afterId:'',processed:0});
             for(let offset=0;offset<operations.length;) {
                 const batch=writeBatch(db);let bytes=0,count=0;
                 while(offset+count<operations.length && count<200) {
@@ -4173,6 +4220,7 @@ window.exportWeeklyWord=async button=>{
                 const ordered=entries=>[...entries].sort((a,b)=>a.id.localeCompare(b.id));
                 if(canonicalJSON(ordered(restored.collections[name]))!==canonicalJSON(ordered(backup.collections[name]))) throw new Error(`Verification mismatch in ${name}. Stop other users and restore again.`);
             }
+            invalidateReads();
             await setMaintenance(false);
             sessionStorage.removeItem(SESSION_KEY);
             document.getElementById('records-list').textContent='Database restored. Select a report to load the restored data.';
@@ -4251,6 +4299,9 @@ window.exportWeeklyWord=async button=>{
         if(!(document.documentElement.requestFullscreen||document.documentElement.webkitRequestFullscreen))throw Error('This browser cannot enter fullscreen. Use a supported browser before starting the exam.');
     }
     let draftRevision=0,draftBlocked=false,draftFlight=null,draftTimer=null,correctionBase=null;
+    let lastDraftSignature='',lastDraftAttemptMs=0;
+    const DRAFT_SYNC_MS=15000;
+    function draftSignature(d){return canonicalJSON({recordId:d.recordId,startedAt:d.startedAt,answers:d.answers||{},currentIndex:d.currentIndex||0,departureCount:d.departureCount||0,locked:d.locked===true,submissionReason:d.submissionReason||''});}
     let restoredGuardCount=0,restoredGuardLocked=false;
     const draftKey=id=>'luya-attempt-draft-v2:'+id;
     function localDraft(id) {
@@ -4268,22 +4319,26 @@ window.exportWeeklyWord=async button=>{
     function queueDraftSave() {
         savePageSession();
         if(!isExamActive || isCorrectionMode || savingResult || draftBlocked || examGuard.locked)return;
-        clearTimeout(draftTimer);draftTimer=setTimeout(()=>void flushDraft(),700);
+        if(!draftTimer)draftTimer=setTimeout(()=>{draftTimer=null;void flushDraft();},Math.max(3000,DRAFT_SYNC_MS-(Date.now()-lastDraftAttemptMs)));
     }
-    async function flushDraft() {
+    async function flushDraft(urgent=false) {
         if(draftFlight)return draftFlight;
         if(!isExamActive || isCorrectionMode || draftBlocked || !activeRecord?.recordId || Date.now()>=attemptDeadline(activeRecord))return;
         persistLocalDraft();
         const payload={recordId:activeRecord.recordId,startedAt:activeRecord.startedAt,studentName:currentUser,studentHR:currentUserHR,
             answers:{...userAnswers},currentIndex,departureCount:examGuard.count,locked:examGuard.locked,
             submissionReason:activeRecord.submissionReason||'',updatedMs:Date.now()};
+        const signature=draftSignature(payload);
+        if(signature===lastDraftSignature)return;
+        if(!urgent && Date.now()-lastDraftAttemptMs<DRAFT_SYNC_MS)return;
+        lastDraftAttemptMs=Date.now();
         const expected=draftRevision;
         draftFlight=runTransaction(db,async tx=>{
             const ref=doc(db,'attemptDrafts',payload.recordId),old=await tx.get(ref);
             const revision=old.exists()?Number(old.data().revision)||0:0;
             if(revision!==expected)throw Object.assign(Error('The draft changed in another window. Reload to resume the newest saved version.'),{code:'draft-conflict'});
             tx.set(ref,{...payload,revision:revision+1});return revision+1;
-        }).then(revision=>{draftRevision=revision;persistLocalDraft();},error=>{
+        }).then(revision=>{draftRevision=revision;lastDraftSignature=signature;persistLocalDraft();},error=>{
             if(error.code==='draft-conflict') {
                 draftBlocked=true;stopExamCountdown();stopExamGuard();
                 guardMessage(error.message);guardButton.textContent='Reload saved draft';guardButton.onclick=()=>location.reload();
@@ -4297,6 +4352,7 @@ window.exportWeeklyWord=async button=>{
         const remote=cloud.exists()?cloud.data():null,candidate=localDraft(id);
         const local=candidate?.startedAt===activeRecord.startedAt?candidate:null;
         draftRevision=remote?.revision||0;
+        lastDraftSignature=remote?draftSignature(remote):'';lastDraftAttemptMs=0;
         // A newer remote revision wins over another tab's stale local draft.
         let saved=local&&sameStudent(local,currentStudent())&&(!remote || Number(local.revision)>=draftRevision) ? local : remote;
         if(!saved && resuming) {
@@ -4314,8 +4370,8 @@ window.exportWeeklyWord=async button=>{
         }
     }
     function clearAttemptDraft(id) {clearTimeout(draftTimer);try{localStorage.removeItem(draftKey(id));}catch{}}
-    setInterval(()=>{if(isExamActive&&!isCorrectionMode&&!savingResult&&!examGuard.locked)void flushDraft();},10000);
-    document.addEventListener('visibilitychange',()=>{if(document.hidden&&isExamActive){savePageSession();void flushDraft();}});
+    setInterval(()=>{if(isExamActive&&!isCorrectionMode&&!savingResult&&!examGuard.locked)void flushDraft();},DRAFT_SYNC_MS);
+    document.addEventListener('visibilitychange',()=>{if(document.hidden&&isExamActive){savePageSession();void flushDraft(true);}});
 
     function encodeFirestoreValue(value) {
         if(value instanceof Timestamp)return {__luyaType:'timestamp',seconds:value.seconds,nanoseconds:value.nanoseconds};
@@ -4353,6 +4409,119 @@ window.exportWeeklyWord=async button=>{
         for(const row of backup.collections.examUnits)if(row.data.isOpen && row.data.scheduleEnabled && !examWindow(row.data))throw Error(`Invalid schedule: ${row.id}`);
         for(const rows of Object.values(backup.collections))for(const row of rows)decodeFirestoreValue(row.data);
     }
+
+    let preparingReports=false,lastAdminReport=null;
+    function reportFields(data) {
+        const patch={reportName:normalizeLoginValue(data.studentName),reportHR:getStudentHR(data.studentName,data.studentHR)};
+        if(Number(data.book)>=1&&Number(data.book)<=6&&Number(data.unit)>=1&&Number(data.unit)<=30) {
+            const key=unitKey(Number(data.book),Number(data.unit));
+            if(data.unitId && data.unitId!==key)throw Error('Conflicting Book/Unit and unitId; review this legacy record before preparing reports.');
+            patch.unitId=key;
+        }
+        if(Array.isArray(data.details))patch.needsCorrection=recordDetails(data).some(d=>!d.isCorrect);
+        return patch;
+    }
+    async function ensureReportFields(force=false) {
+        const snap=await cachedRead('report-fields',()=>getDocFromServer(doc(db,'system','reportIndex')),force,['system']);
+        if(!snap.exists()||snap.data().version!==1||snap.data().status!=='ready')throw Error('Please use Prepare Report Data first. Legacy records need query fields; no full-history fallback will be run.');
+    }
+    async function loadAdminUnitData(unitIds,force=false) {
+        await ensureReportFields(force);
+        const ids=[...new Set(unitIds)];
+        const [records,starts]=await Promise.all([
+            Promise.all(ids.map(id=>unitDocuments('records',id,force))),
+            Promise.all(ids.map(id=>unitDocuments('examStarts',id,force)))
+        ]);
+        return {records:combineDocuments(records).docs.map(d=>({...d.data(),recordId:d.id})),starts:combineDocuments(starts).docs.map(d=>({...d.data(),id:d.id}))};
+    }
+    async function checkAdminParticipation(book,unit,force=false) {
+        // Administrative schedule changes must not rely on a stale report snapshot.
+        const id=unitKey(book,unit),data=await loadAdminUnitData([id],force);
+        unitRecords=unitRecords.filter(r=>!sameExam(r,{unitId:id,book,unit})).concat(data.records);
+        examStarts=examStarts.filter(a=>!sameExam(a,{unitId:id,book,unit})).concat(data.starts);
+    }
+    async function historyDocuments(name,hr,start,end) {
+        await ensureReportFields();
+        return filteredDocuments('records',[['reportName','==',normalizeLoginValue(name)],['reportHR','==',hr],['date','>=',start],['date','<=',end]]);
+    }
+    async function rankingDocuments(start,end,classes) {
+        await ensureReportFields();
+        const dates=await Promise.all([...new Set(classes)].map(hr=>filteredDocuments('records',[['reportHR','==',hr],['date','>=',start],['date','<=',end]])));
+        const candidates=combineDocuments(dates);
+        // Older duplicate attempts must not become a student's "first" just because
+        // a date filter hid the original. Only inspect earlier records of candidate units/classes.
+        const pairs=new Map();
+        for(const d of candidates.docs) {
+            const r=d.data();if(r.unitId)pairs.set(JSON.stringify([r.reportHR,r.unitId]),[r.reportHR,r.unitId]);
+        }
+        const earlier=await Promise.all([...pairs.values()].map(([hr,id])=>filteredDocuments('records',[['reportHR','==',hr],['unitId','==',id],['date','<',start]])));
+        return combineDocuments([candidates,...earlier]);
+    }
+    async function prepareReportData() {
+        if(!isAdmin||preparingReports||document.getElementById('btn-restore-database').disabled||document.getElementById('btn-backup-database').disabled)return;
+        if(!studentDirectoryLoaded){alert('Load Name.xlsx before preparing report data.');return;}
+        if(!await confirmDatabaseWarning('Prepare legacy report data? Run this with students and other administrators signed out. Each click reads at most 1,000 historical records/attempts plus settings, and only writes fields that need updating. Progress is saved so you can continue later. A brief maintenance lock blocks student writes.'))return;
+        preparingReports=true;
+        document.getElementById("btn-backup-database").disabled=true;document.getElementById("btn-restore-database").disabled=true;
+        const button=document.getElementById('btn-prepare-reports'),status=document.getElementById('admin-read-status');button.disabled=true;
+        let acquired=false;
+        try {
+            await setMaintenance(true);acquired=true;
+            const marker=doc(db,'system','reportIndex'),saved=await getDocFromServer(marker);
+            let state=saved.exists()?saved.data():{version:1,status:'preparing',phase:'records',afterId:'',processed:0};
+            if(state.status==='ready'){status.textContent='Report data is already prepared.';return;}
+            if(!['records','examStarts'].includes(state.phase))state={version:1,status:'preparing',phase:'records',afterId:'',processed:0};
+            const units=await cachedCollection('examUnits',true);
+            const unitMap=new Map(units.docs.map(d=>[d.id,d.data()]));
+            const scheduleBatch=writeBatch(db);let schedulesChanged=false;
+            for(const row of units.docs){const value=row.data(),window=examWindow(value);if(!window)continue;const patch={};
+                if(value.startMs!==window.start||value.endMs!==window.end){patch.startMs=window.start;patch.endMs=window.end;}
+                if(!value.examClasses)patch.examClasses=value.allowedClasses||[];
+                if(Object.keys(patch).length){scheduleBatch.update(doc(db,'examUnits',row.id),patch);schedulesChanged=true;}}
+            if(schedulesChanged)await scheduleBatch.commit();
+            let budget=1000;
+            while(budget>0 && state.status!=='ready') {
+                const constraints=[orderBy(documentId()),limit(Math.min(200,budget))];
+                if(state.afterId)constraints.push(startAfter(state.afterId));
+                const page=await getDocsFromServer(query(collection(db,state.phase),...constraints));
+                const batch=writeBatch(db),participation=new Set();
+                for(const row of page.docs) {
+                    const original=row.data(),fields=reportFields(original),patch={};
+                    if(state.phase==='records')fields.needsCorrection=recordDetails(original).some(d=>!d.isCorrect);
+                    else {delete fields.reportName;delete fields.reportHR;delete fields.needsCorrection;}
+                    for(const [key,value]of Object.entries(fields))if(original[key]!==value)patch[key]=value;
+                    if(Object.keys(patch).length)batch.update(doc(db,state.phase,row.id),patch);
+                    const id=fields.unitId||original.unitId;
+                    if(unitMap.has(id)&&!unitMap.get(id).hasParticipation)participation.add(id);
+                }
+                for(const id of participation)batch.update(doc(db,'examUnits',id),{hasParticipation:true});
+                const next={...state,processed:(state.processed||0)+page.docs.length,updatedAt:new Date().toISOString()};
+                if(page.docs.length<Math.min(200,budget)) {
+                    if(state.phase==='records'){next.phase='examStarts';next.afterId='';}
+                    else {next.status='ready';next.afterId='';}
+                } else next.afterId=page.docs[page.docs.length-1].id;
+                batch.set(marker,next);await batch.commit();
+                for(const id of participation)unitMap.get(id).hasParticipation=true;
+                state=next;budget-=page.docs.length;
+                status.textContent=`Prepared ${state.processed} documents. ${state.status==='ready'?'Complete.':'Click Prepare Report Data again after this batch to continue.'}`;
+            }
+        } catch(error){status.textContent='Data preparation stopped: '+error.message+' Saved progress is retained.';}
+        finally {
+            if(acquired)try{await setMaintenance(false);}catch{status.textContent+=' Maintenance is still enabled; check the connection before resuming.';}
+            preparingReports=false;button.disabled=false;
+            document.getElementById("btn-backup-database").disabled=false;document.getElementById("btn-restore-database").disabled=false;
+        }
+    }
+    window.prepareReportData=prepareReportData;
+    window.refreshAdminData=async()=>{
+        if(!isAdmin||preparingReports||savingUnitClasses)return;
+        const button=document.getElementById('btn-refresh-admin');if(button.disabled)return;
+        button.disabled=true;
+        try {
+            invalidateReads();await renderUnits(true);
+            if(lastAdminReport)await lastAdminReport();
+        } finally {button.disabled=false;}
+    };
 
     // Load Name.xlsx automatically after the page DOM is ready.
     loadStudentDirectory().then(restorePageSession);
