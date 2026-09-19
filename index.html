@@ -64,6 +64,9 @@
         #screen-login.hidden ~ .login-footer { display: none; }
 
         #modal-unit-classes .modal-card {max-width:500px;font-family:inherit;}
+        .unit-modal-header {display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;}
+        .unit-modal-header .modal-title {flex:1;min-width:0;}
+        .unit-off-btn {width:auto !important;min-width:72px;padding:8px 16px !important;font-size:0.95rem !important;box-shadow:0 4px 12px rgba(220,38,38,0.2);}
         .schedule-columns {display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;}
         .schedule-columns input,.schedule-columns select {font:inherit;border:1px solid #cbd5e1;border-radius:7px;padding:6px;max-width:100%;}
         .schedule-columns label {display:block;font-weight:700;margin-bottom:6px;}
@@ -762,7 +765,10 @@
 </div>
 <div id="modal-unit-classes" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="unit-classes-title">
     <div class="modal-card" style="max-height:90vh;overflow-y:auto;">
-        <h3 id="unit-classes-title" class="modal-title"></h3>
+        <div class="unit-modal-header">
+            <h3 id="unit-classes-title" class="modal-title" style="margin:0;"></h3>
+            <button id="unit-class-off" type="button" class="btn btn-danger unit-off-btn hidden" onclick="turnOffUnit()" disabled>Off</button>
+        </div>
         <fieldset class="unit-section">
             <legend>Availability Schedule</legend>
             <label><input id="unit-schedule-enabled" type="checkbox" checked disabled> Enable schedule</label>
@@ -785,7 +791,6 @@
             <legend>Exam Duration</legend>
             <select id="unit-exam-duration" aria-label="Exam duration in minutes"></select>
         </fieldset>
-        <button id="unit-class-off" class="hidden" disabled>Off</button>
         <fieldset class="unit-section classes-section">
             <legend>Eligible Classes</legend>
             <div id="unit-class-options" style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;max-height:280px;overflow-y:auto;"></div>
@@ -1740,6 +1745,48 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         resetMakeupEditor();
         document.getElementById('modal-unit-classes').classList.add('hidden');
     }
+    async function turnOffUnit() {
+        if(!isAdmin || !pendingUnitClasses || savingUnitClasses) return;
+        const offBtn=document.getElementById('unit-class-off');
+        if(offBtn.disabled || offBtn.classList.contains('hidden')) return;
+        const {book,unit}=pendingUnitClasses;
+        const key=unitKey(book,unit);
+        if(!confirm(`Turn off ${unitLabel(book,unit)}?\n\nStudents will no longer be able to take this exam during the scheduled window.`)) return;
+        savingUnitClasses=true;
+        offBtn.disabled=true;
+        document.getElementById('unit-class-confirm').disabled=true;
+        document.getElementById('unit-class-cancel').disabled=true;
+        try {
+            await refreshPolicyData(true);
+            const before=policyState(book,unit);
+            if(before.hasParticipation || !mayReplaceSchedule(before,unitRecords,examStarts))
+                throw new Error('This unit can no longer be turned off because a student has started or completed the exam.');
+            const unitRef=doc(db,'examUnits',key);
+            const saved=await runTransaction(db,async transaction=>{
+                const snap=await transaction.get(unitRef);
+                if(!snap.exists()) throw new Error('Unit settings were not found.');
+                const prior=snap.data();
+                if(prior.hasParticipation) throw new Error('This unit can no longer be turned off because a student has started the exam.');
+                const state={...prior,book,unit,isOpen:false,generateMakeupCode:false,allowNoCodeMakeup:false,
+                    updatedAt:new Date().toISOString()};
+                transaction.set(unitRef,state);
+                return state;
+            });
+            unitStates[key]=saved;
+            drawUnits();
+            pendingUnitClasses=null;
+            resetMakeupEditor();
+            document.getElementById('modal-unit-classes').classList.add('hidden');
+        } catch(error) {
+            alert(error.message || 'Unable to turn off this unit.');
+        } finally {
+            savingUnitClasses=false;
+            offBtn.disabled=false;
+            document.getElementById('unit-class-confirm').disabled=false;
+            document.getElementById('unit-class-cancel').disabled=false;
+        }
+    }
+    window.turnOffUnit=turnOffUnit;
     async function confirmUnitClasses(keepOpen=true) {
         if(!isAdmin || !pendingUnitClasses || savingUnitClasses) return;
         const classes=getSelectedLeaderboardClasses('unit-class-options');
@@ -1875,8 +1922,12 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             pendingUnitClasses={book,unit};
             populateUnitSchedule(state);
             document.getElementById('unit-classes-title').textContent=`📚 ${unitLabel(book,unit)}`;
-            document.getElementById('unit-class-off').classList.add('hidden');
             const locked=state.hasParticipation || !mayReplaceSchedule(state,unitRecords,examStarts);
+            const offBtn=document.getElementById('unit-class-off');
+            // Off only when unit is open and nobody has started/completed (and none in progress).
+            const canTurnOff=!locked && state.isOpen===true;
+            offBtn.classList.toggle('hidden', !canTurnOff);
+            offBtn.disabled=!canTurnOff;
             document.querySelectorAll('#unit-schedule-fields input,#unit-schedule-fields select,#unit-class-options input,#unit-exam-duration').forEach(el=>el.disabled=locked);
             const codeRadio=document.getElementById('makeup-mode-code');
             const noCodeRadio=document.getElementById('makeup-mode-nocode');
