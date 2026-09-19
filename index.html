@@ -3514,7 +3514,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             panel.setAttribute('role','dialog');
             panel.setAttribute('aria-modal','true');
             panel.setAttribute('aria-label','Submit Exam');
-            panel.innerHTML='<div class="modal-card"><h3>Submit Exam</h3><p style="white-space:pre-line"></p><button type="button" class="btn">Continue Exam</button> <button type="button" class="btn btn-blue-grad">Submit Exam</button></div>';
+            panel.innerHTML='<div class="modal-card" style="max-width:420px;"><h3 style="margin:0 0 14px;">Submit Exam</h3><p style="white-space:pre-line;line-height:1.55;margin:0 0 22px;color:#334155;"></p><div style="display:flex;flex-direction:column;gap:12px;"><button type="button" class="btn">Continue Exam</button><button type="button" class="btn btn-blue-grad">Submit Exam</button></div></div>';
             panel.querySelector('p').textContent=message;
             const buttons=panel.querySelectorAll('button');
             const previous=document.activeElement;
