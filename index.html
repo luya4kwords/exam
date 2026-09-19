@@ -775,7 +775,7 @@
         <fieldset class="unit-section makeup-section">
             <legend>Make-up Exam</legend>
             <label><input id="makeup-mode-code" name="makeup-mode" type="radio" value="code"> Generate Make-up Code</label>
-            <label><input id="makeup-mode-nocode" name="makeup-mode" type="radio" value="nocode"> No Code Required</label>
+            <label><input id="makeup-mode-nocode" name="makeup-mode" type="radio" value="nocode" checked> No Code Required</label>
             <div id="makeup-code-display" role="status"></div>
         </fieldset>
         <fieldset class="unit-section duration-section">
@@ -1585,10 +1585,10 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         makeupDraft=null;
         const codeRadio=document.getElementById('makeup-mode-code');
         const noCodeRadio=document.getElementById('makeup-mode-nocode');
+        // Default to No Code Required when the unit has no saved preference.
         const useCode=state.generateMakeupCode===true;
-        const useNoCode=state.allowNoCodeMakeup===true;
-        codeRadio.checked=useCode || (!useCode && !useNoCode);
-        noCodeRadio.checked=useNoCode && !useCode;
+        codeRadio.checked=useCode;
+        noCodeRadio.checked=!useCode;
         codeRadio.disabled=false;
         noCodeRadio.disabled=false;
         document.getElementById('makeup-code-display').textContent='';
@@ -1895,6 +1895,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             notice.style.margin='12px 0 0';
             closeButton.parentElement.style.marginTop='12px';
             void showSharedMakeupCode();
+            if(!locked && isMakeupCodeMode()) void previewMakeupCode();
             document.getElementById('unit-class-confirm').textContent='Save';
             document.getElementById('modal-unit-classes').classList.remove('hidden');
             (locked ? closeButton : document.getElementById('unit-class-confirm')).focus();
