@@ -550,6 +550,13 @@
             margin-bottom: 20px;
         }
 
+        .btn-resume-soft { background:#FEF3C7; color:#92400E; border:1px solid #FCD34D; box-shadow:none; }
+        .btn-resume-soft:hover { background:#FDE68A; color:#78350F; box-shadow:none; }
+        .btn-resume-soft:focus-visible { outline:2px solid #B45309; outline-offset:3px; }
+        .btn-prepare-soft { background:#EDE9FE; color:#6D28D9; border:1px solid #C4B5FD; box-shadow:none; }
+        .btn-prepare-soft:hover { background:#DDD6FE; color:#5B21B6; box-shadow:none; }
+        .btn-prepare-soft:focus-visible { outline:2px solid #7C3AED; outline-offset:3px; }
+
         .analytics-heading { display:flex; align-items:center; flex-wrap:wrap; gap:8px 12px; margin-top:4px; }
         .analytics-heading h3 { color:var(--text-main); font-size:1.15rem; line-height:26px; margin:0; }
         .analytics-heading .btn-refresh-soft {
@@ -637,7 +644,7 @@
                 <div class="admin-database-buttons">
                     <button id="btn-backup-database" class="btn btn-inline btn-blue-grad" onclick="backupDatabase()">💾 Backup Database</button>
                     <button id="btn-restore-database" class="btn btn-inline btn-emerald-grad" onclick="requestDatabaseRestore()">↩ Restore Database</button>
-                    <button id="btn-prepare-reports" class="btn btn-inline btn-secondary" onclick="prepareReportData()">Prepare Report Data (up to 1,000)</button>
+                    <button id="btn-prepare-reports" class="btn btn-inline btn-prepare-soft" onclick="prepareReportData()">Prepare Report Data (up to 1,000)</button>
                 </div>
                 <input id="restore-file" type="file" accept=".json,application/json" hidden onchange="restoreDatabase(this)">
             </div>
@@ -4285,7 +4292,7 @@ window.exportWeeklyWord=async button=>{
         }
     };
     const maintenanceButton=document.createElement('button');
-    maintenanceButton.className='btn btn-inline btn-secondary';maintenanceButton.textContent='Resume after maintenance';
+    maintenanceButton.className='btn btn-inline btn-resume-soft';maintenanceButton.textContent='Resume after maintenance';
     maintenanceButton.onclick=window.resumeTestingAfterMaintenance;
     document.getElementById('btn-restore-database').after(maintenanceButton);
 
