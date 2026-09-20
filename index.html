@@ -550,15 +550,18 @@
             margin-bottom: 20px;
         }
 
-        .btn-refresh-soft {
-            background: #E0F2FE;
-            color: #0284C7;
-            border: 1px solid #0284C7;
-            box-shadow: 0 2px 5px rgba(2,132,199,0.08);
-            margin: 0;
+        .analytics-heading { display:flex; align-items:center; flex-wrap:wrap; gap:8px 12px; margin-top:4px; }
+        .analytics-heading h3 { color:var(--text-main); font-size:1.15rem; line-height:26px; margin:0; }
+        .analytics-heading .btn-refresh-soft {
+            display:inline-flex; align-items:center; justify-content:center; gap:4px;
+            width:auto; height:26px; padding:0 9px; margin:0;
+            font-size:0.75rem; line-height:1; font-weight:600; white-space:nowrap;
+            border-radius:6px; box-sizing:border-box;
+            background:#F1F5F9; color:#475569; border:1px solid #CBD5E1;
+            box-shadow:none;
         }
-        .btn-refresh-soft:hover { background: #BAE6FD; color: #0369A1; }
-        .btn-refresh-soft:focus-visible { outline: 2px solid #0284C7; outline-offset: 3px; }
+        .analytics-heading .btn-refresh-soft:hover { background:#E2E8F0; color:#334155; transform:none; }
+        .analytics-heading .btn-refresh-soft:focus-visible { outline:2px solid #64748B; outline-offset:3px; }
 
         .score-display {
             text-align: center; padding: 24px; background: linear-gradient(135deg, #4f46e5, #312e81);
@@ -672,12 +675,14 @@
 
         <!-- Admin View Records -->
         <div class="records-section">
-            <h3 style="color: var(--text-main); font-size: 1.15rem; margin-top: 4px;">📊 Student Exam & Score Analytics</h3>
+            <div class="analytics-heading">
+                <h3>📊 Student Exam & Score Analytics</h3>
+                <button id="btn-refresh-admin" class="btn btn-refresh-soft" onclick="refreshAdminData()">↻ Refresh Data</button>
+            </div>
 
 
             <div class="admin-btn-grid">
-                <button id="btn-refresh-admin" class="btn admin-action-btn btn-refresh-soft" onclick="refreshAdminData()">↻ Refresh Data</button>
-                <button class="btn btn-blue-grad admin-action-btn" style="grid-column:1;" onclick="loadAdminStudentRecords()">📚 Unit Records</button>
+                <button class="btn btn-blue-grad admin-action-btn" onclick="loadAdminStudentRecords()">📚 Unit Records</button>
                 <button class="btn btn-blue-grad admin-action-btn" onclick="calculateWeeklyLeaderboard()">🏆 Weekly Ranking</button>
                 <button class="btn btn-blue-grad admin-action-btn" onclick="openCustomRangeModal()">🗓️ Custom Ranking</button>
                 
