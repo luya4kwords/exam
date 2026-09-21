@@ -1362,7 +1362,7 @@
         else if(/Windows/.test(ua)) operatingSystem='Windows';
         else if(/Macintosh|Mac OS X/.test(ua)) operatingSystem='macOS';
         else if(/Linux/.test(ua)) operatingSystem='Linux';
-        return {browserName,browserVersion,operatingSystem,userAgent:ua,appVersion:'2026-09-20-read-efficient-3',capturedAt:new Date().toISOString()};
+        return {browserName,browserVersion,operatingSystem,userAgent:ua,appVersion:'2026-09-21-admin-finalize-1',capturedAt:new Date().toISOString()};
     }
 
     let unitStates = {}, unitRecords = [], activeRecord = null, activeUnit = null;
@@ -1538,7 +1538,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         if(!isAdmin)return;
         const pending=examStarts.filter(a=>(!unitId || unitKey(a.book,a.unit)===unitId) && a.status==='in_progress' && Date.now()>=attemptDeadline(a));
         document.getElementById('admin-sync-status').textContent=pending.length
-            ? `${pending.length} expired attempt(s) await submission. Students can reopen the unit to submit saved answers. No automatic zero scores were created.` : '';
+            ? `${pending.length} expired attempt(s) await finalization. Use Finalize in Unit Records to grade saved answers.` : '';
     }
 
     function expiredOwnAttempt(book,unit) {
@@ -2117,6 +2117,44 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     }
 
 
+    async function finalizeSavedAttempt(id, button) {
+        if(!isAdmin || button.disabled)return;
+        button.disabled=true;button.textContent='Finalizing…';
+        try {
+            await runTransaction(db,async tx=>{
+                const resultRef=doc(db,'records',id),startRef=doc(db,'examStarts',id),draftRef=doc(db,'attemptDrafts',id);
+                const existing=await tx.get(resultRef);
+                if(existing.exists())return; // Never overwrite a submitted or corrected result.
+                const start=await tx.get(startRef),draft=await tx.get(draftRef);
+                if(!start.exists())throw Error('The original attempt no longer exists.');
+                const a=start.data(),d=draft.exists()?draft.data():null;
+                if(a.status!=='in_progress' || !Number.isFinite(attemptDeadline(a)) || Date.now()<attemptDeadline(a))throw Error('Only expired, unfinished attempts can be finalized.');
+                if(!d || d.recordId!==id || d.startedAt!==a.startedAt || d.studentName!==a.studentName || d.studentHR!==a.studentHR || !d.answers || typeof d.answers!=='object' || Array.isArray(d.answers) || !Object.keys(d.answers).length)throw Error('No usable saved answers were found. Please review this attempt; no score was created.');
+                if(!Array.isArray(a.questionSnapshot) || !a.questionSnapshot.length)throw Error('The original question snapshot is missing. No score was created.');
+                const details=a.questionSnapshot.map(q=>{
+                    if(typeof q.answer!=='string' || typeof q.stem!=='string' || !Number.isFinite(q.points) || q.points<=0)throw Error('The question snapshot is invalid. No score was created.');
+                    const userAns=typeof d.answers[q.id]==='string'?d.answers[q.id].trim():'';
+                    const correctAns=q.answer.trim(),isCorrect=!!userAns && checkAnswer(q.type,userAns,correctAns);
+                    return {id:q.id,type:q.type,stem:q.stem,choice_a:q.choice_a||'',choice_b:q.choice_b||'',choice_c:q.choice_c||'',choice_d:q.choice_d||'',userAns:userAns||'No Answer',correctAns,isCorrect,points:q.points,earnedPoints:isCorrect?q.points:0};
+                });
+                const saved={...a,recordId:id,details,totalPossible:details.reduce((sum,q)=>sum+q.points,0),answerDataUnavailable:false,departureCount:Number(d.departureCount)||0,finalizationSource:'admin_saved_draft',finalizedBy:auth.currentUser.uid,sourceDraftRevision:d.revision||0,sourceDraftUpdatedMs:d.updatedMs||0};
+                Object.assign(saved,reportFields(saved));
+                finalizeAutomaticSubmission(saved,'time_limit');
+                tx.set(resultRef,saved);
+                tx.update(startRef,{status:'completed'});
+                tx.update(draftRef,{locked:true,submissionReason:'time_limit'});
+            });
+        } catch(error) {
+            alert('Unable to finalize: '+error.message);
+            button.disabled=false;button.textContent='Finalize';return;
+        }
+        button.textContent='Finalized';
+        await loadAdminStudentRecords(true);
+    }
+    document.addEventListener('click',event=>{
+        const button=event.target.closest('button[data-finalize-attempt]');
+        if(button)void finalizeSavedAttempt(button.dataset.finalizeAttempt,button);
+    });
     async function loadAdminStudentRecords(force=false) {
         if (!isAdmin) return;
         if (selectedBook === null || selectedUnit === null) {
@@ -2140,7 +2178,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         } catch(error) { container.textContent="❌ Unable to load records. "+error.message; return; }
         if(targetUnit !== unitKey(selectedBook,selectedUnit)) return;
         const pendingAttempts=examStarts.filter(a=>unitKey(a.book,a.unit)===targetUnit && a.status==='in_progress' && Date.now()>=attemptDeadline(a) && !records.some(r=>r.recordId===(a.recordId||a.id)));
-        if(pendingAttempts.length)heading+='<div class="card-box"><strong>Expired — awaiting saved answers</strong><ul>'+pendingAttempts.map(a=>'<li>'+escapeHTML(a.studentHR)+' '+studentDisplayHTML(a.studentName,a.studentHR)+' — '+escapeHTML(taiwanDateTime(attemptDeadline(a)).replace('T',' '))+'</li>').join('')+'</ul><p>Ask these students to reopen the unit and submit their saved answers. No zero scores have been assumed.</p></div>';
+        if(pendingAttempts.length)heading+='<div class="card-box"><strong>Expired — awaiting finalization</strong><ul>'+pendingAttempts.map(a=>'<li style="margin:10px 0">'+escapeHTML(a.studentHR)+' '+studentDisplayHTML(a.studentName,a.studentHR)+' — '+escapeHTML(taiwanDateTime(attemptDeadline(a)).replace('T',' '))+' <button type="button" class="btn btn-inline btn-blue-grad" style="margin-left:12px" data-finalize-attempt="'+escapeHTML(a.recordId||a.id)+'" title="Grade saved answers and finalize this attempt.">Finalize</button></li>').join('')+'</ul><p>Finalize grades the last cloud-saved answers using the original exam questions. Unanswered questions receive 0 points. Attempts without usable drafts require review.</p></div>';
         const eligibleClasses=recordUnitState.examClasses || recordUnitState.allowedClasses || [];
         const classAttempts=new Map(eligibleClasses.map(hr=>[String(hr).trim(),0]).filter(([hr])=>hr));
         for(const rec of records || []) {
