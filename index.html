@@ -633,7 +633,33 @@
         @media(max-width:1000px) {
             .admin-database-tools { grid-column:1; grid-row:auto; }
         }
-    </style>
+    
+        .reset-attempt-button {
+            background:linear-gradient(180deg,#fff5f5 0%,#ffe4e6 48%,#fecdd3 100%);
+            color:#9f263c;border:1px solid #f5a9b6;
+            box-shadow:inset 0 1px 0 rgba(255,255,255,.95),0 2px 5px rgba(159,38,60,.12);
+            display:inline-flex;align-items:center;justify-content:center;gap:7px;
+            transition:background .18s ease,border-color .18s ease,box-shadow .18s ease;
+        }
+        .reset-attempt-button:hover:not(:disabled) {
+            background:linear-gradient(180deg,#ffe4e6 0%,#fecdd3 48%,#fda4af 100%);
+            border-color:#ec879b;
+            box-shadow:inset 0 1px 0 rgba(255,255,255,.85),0 3px 8px rgba(159,38,60,.2);
+        }
+        .reset-attempt-button:focus-visible {outline:3px solid #b45309;outline-offset:3px;}
+        .reset-attempt-button:disabled {opacity:.65;cursor:wait;}
+        .reset-warning-icon {
+            display:inline-block;position:relative;flex:0 0 23px;width:23px;height:22px;
+            color:#713f12;font-size:16px;line-height:26px;font-weight:900;text-align:center;
+        }
+        .reset-warning-icon::before {
+            content:'';position:absolute;inset:0;
+            background:linear-gradient(180deg,#fff3a3,#facc15 60%,#eab308);
+            clip-path:polygon(50% 2%,100% 96%,0 96%);
+        }
+        .reset-warning-icon::after {content:'!';position:relative;}
+
+</style>
 </head>
 <body>
 
@@ -2143,7 +2169,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             examStarts=examStarts.filter(a=>(a.recordId||a.id)!==id);
         } catch(error) {
             alert('Unable to reset attempt: '+error.message);
-            button.disabled=false;button.innerHTML='<span aria-hidden="true">⚠</span> Reset Attempt';return;
+            button.disabled=false;button.innerHTML='<span class="reset-warning-icon" aria-hidden="true"></span> Reset Attempt';return;
         }
         button.textContent='Reset';
         await loadAdminStudentRecords(true);
@@ -2265,7 +2291,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 <div class="record-summary">
                     <span style="font-size:1rem; font-weight:700;">👤 <span style="color:#16a34a;">${escapeHTML(getStudentHR(rec.studentName, rec.studentHR))}</span> <span style="color:#0f172a;">${studentDisplayHTML(rec.studentName,rec.studentHR,rec.c_name)}</span></span>
                     <span>${escapeHTML(recordLabel(rec))} · Exam date: ${escapeHTML(rec.date)}<br>Initial Score: <strong style="color: var(--primary-color); font-size: 1.1rem;">${escapeHTML(rec.score)} / ${escapeHTML(rec.totalPossible)}</strong> ${isPerfectScore ? '<span style="color:var(--success-color); font-size:0.85rem; font-weight:700;">(Perfect Score)</span>' : isFullyCorrected ? '<span style="color:var(--success-color); font-size:0.85rem; font-weight:700;">(Correction Complete)</span>' : '<span style="color:var(--danger-color); font-size:0.85rem; font-weight:700;">(Needs Correction)</span>'}</span>
-                    <span style="display:flex;gap:8px;flex-wrap:wrap"><button type="button" class="btn btn-inline reset-attempt-button" style="background:#b91c1c;color:#ffffff;border:1px solid #991b1b" title="Remove this attempt so the student can take the unit again."><span aria-hidden="true">⚠</span> Reset Attempt</button><button class="btn btn-inline btn-secondary" onclick="toggleDetails('rec-detail-${idx}')">Details</button></span>
+                    <span style="display:flex;gap:8px;flex-wrap:wrap"><button type="button" class="btn btn-inline reset-attempt-button" title="Remove this attempt so the student can take the unit again."><span class="reset-warning-icon" aria-hidden="true"></span> Reset Attempt</button><button class="btn btn-inline btn-secondary" onclick="toggleDetails('rec-detail-${idx}')">Details</button></span>
                 </div>
                 <div id="rec-detail-${idx}" class="hidden" style="margin-top: 10px;">
                     ${detailsHtml}
