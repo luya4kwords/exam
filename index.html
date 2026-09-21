@@ -1062,6 +1062,7 @@
             const start=await transaction.get(startRef);
             if(!start.exists())throw Error('The original attempt was removed. Ask your teacher before retrying.');
             const a=start.data();
+            if(a.startedAt!==recordData.startedAt)throw Error('This attempt was reset. Refresh the page before starting again.');
             const draft=await transaction.get(doc(db,'attemptDrafts',recordData.recordId));
             if(draft.exists() && (Number(draft.data().revision)||0)!==draftRevision)throw Error('A newer draft exists in another window. Reload before submitting.');
             if(!sameStudent(a,currentStudent()))throw Error('Student name does not match the original attempt.');
@@ -1362,7 +1363,7 @@
         else if(/Windows/.test(ua)) operatingSystem='Windows';
         else if(/Macintosh|Mac OS X/.test(ua)) operatingSystem='macOS';
         else if(/Linux/.test(ua)) operatingSystem='Linux';
-        return {browserName,browserVersion,operatingSystem,userAgent:ua,appVersion:'2026-09-21-admin-finalize-1',capturedAt:new Date().toISOString()};
+        return {browserName,browserVersion,operatingSystem,userAgent:ua,appVersion:'2026-09-21-admin-reset-1',capturedAt:new Date().toISOString()};
     }
 
     let unitStates = {}, unitRecords = [], activeRecord = null, activeUnit = null;
@@ -2117,6 +2118,37 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
     }
 
 
+    async function resetExamAttempt(record, button) {
+        if(!isAdmin || !isAllowedAdmin(auth.currentUser) || button.disabled)return;
+        const id=record.recordId;
+        if(!id)return;
+        if(!confirm('Reset Attempt for '+record.studentHR+' '+record.studentName+' — '+unitLabel(record.book,record.unit)+'?\n\nThis permanently deletes this attempt’s score, corrections, start record and cloud draft. The student must refresh the page before starting again. The unit must be open for admission.'))return;
+        button.disabled=true;button.textContent='Resetting…';
+        try {
+            await runTransaction(db,async tx=>{
+                const resultRef=doc(db,'records',id),startRef=doc(db,'examStarts',id),draftRef=doc(db,'attemptDrafts',id);
+                const result=await tx.get(resultRef),start=await tx.get(startRef),draft=await tx.get(draftRef);
+                for(const snap of [result,start,draft])if(snap.exists()) {
+                    const current=snap.data();
+                    if(current.studentName!==record.studentName || current.studentHR!==record.studentHR || current.startedAt!==record.startedAt)throw Error('This attempt has changed. Refresh the report before resetting it.');
+                }
+                if(result.exists() && canonicalJSON(result.data())!==canonicalJSON(Object.fromEntries(Object.entries(record).filter(([key])=>key!=='recordId')))) {
+                    const latest={...result.data(),recordId:id};
+                    if(canonicalJSON(latest)!==canonicalJSON(record))throw Error('The result has changed. Refresh the report before resetting it.');
+                }
+                tx.delete(resultRef);tx.delete(startRef);tx.delete(draftRef);
+            });
+            clearAttemptDraft(id);
+            unitRecords=unitRecords.filter(r=>r.recordId!==id);
+            examStarts=examStarts.filter(a=>(a.recordId||a.id)!==id);
+        } catch(error) {
+            alert('Unable to reset attempt: '+error.message);
+            button.disabled=false;button.textContent='Reset Attempt';return;
+        }
+        button.textContent='Reset';
+        await loadAdminStudentRecords(true);
+    }
+
     async function finalizeSavedAttempt(id, button) {
         if(!isAdmin || button.disabled)return;
         button.disabled=true;button.textContent='Finalizing…';
@@ -2233,12 +2265,13 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                 <div class="record-summary">
                     <span style="font-size:1rem; font-weight:700;">👤 <span style="color:#16a34a;">${escapeHTML(getStudentHR(rec.studentName, rec.studentHR))}</span> <span style="color:#0f172a;">${studentDisplayHTML(rec.studentName,rec.studentHR,rec.c_name)}</span></span>
                     <span>${escapeHTML(recordLabel(rec))} · Exam date: ${escapeHTML(rec.date)}<br>Initial Score: <strong style="color: var(--primary-color); font-size: 1.1rem;">${escapeHTML(rec.score)} / ${escapeHTML(rec.totalPossible)}</strong> ${isPerfectScore ? '<span style="color:var(--success-color); font-size:0.85rem; font-weight:700;">(Perfect Score)</span>' : isFullyCorrected ? '<span style="color:var(--success-color); font-size:0.85rem; font-weight:700;">(Correction Complete)</span>' : '<span style="color:var(--danger-color); font-size:0.85rem; font-weight:700;">(Needs Correction)</span>'}</span>
-                    <button class="btn btn-inline btn-secondary" onclick="toggleDetails('rec-detail-${idx}')">Details</button>
+                    <span style="display:flex;gap:8px;flex-wrap:wrap"><button type="button" class="btn btn-inline btn-secondary reset-attempt-button" style="color:#b91c1c" title="Remove this attempt so the student can take the unit again.">Reset Attempt</button><button class="btn btn-inline btn-secondary" onclick="toggleDetails('rec-detail-${idx}')">Details</button></span>
                 </div>
                 <div id="rec-detail-${idx}" class="hidden" style="margin-top: 10px;">
                     ${detailsHtml}
                 </div>
             `;
+            recEl.querySelector('.reset-attempt-button').addEventListener('click',event=>void resetExamAttempt(rec,event.currentTarget));
             container.appendChild(recEl);
         });
         container.insertAdjacentHTML('beforeend',totalFooter);
@@ -4413,7 +4446,8 @@ window.exportWeeklyWord=async button=>{
     async function restoreAttemptDraft(resuming) {
         restoredGuardCount=0;restoredGuardLocked=false;
         const id=activeRecord.recordId,cloud=await getDocFromServer(doc(db,'attemptDrafts',id));
-        const remote=cloud.exists()?cloud.data():null,candidate=localDraft(id);
+        const remote=cloud.exists()?cloud.data():null,candidate=resuming?localDraft(id):null;
+        if(!resuming)clearAttemptDraft(id);
         const local=candidate?.startedAt===activeRecord.startedAt?candidate:null;
         draftRevision=remote?.revision||0;
         lastDraftSignature=remote?draftSignature(remote):'';lastDraftAttemptMs=0;
