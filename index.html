@@ -1069,18 +1069,18 @@
                 const latest=existing.data(),saved=cloneExamData(latest);
                 const changes=[];
                 for(const q of questions) {
-                    const before=correctionBase.details.find(d=>d.id===q.id);
-                    const now=saved.details.find(d=>d.id===q.id);
-                    const proposed=recordData.details.find(d=>d.id===q.id);
+                    const before=recordDetails(correctionBase).find(d=>d.id===q.id);
+                    const now=recordDetails(saved).find(d=>d.id===q.id);
+                    const proposed=recordDetails(recordData).find(d=>d.id===q.id);
                     if(!before || !now || !proposed || now.stem!==before.stem || now.correctAns!==before.correctAns)throw Error('The question version changed. Reload before correcting.');
                     if(now.isCorrect)continue; // A completed correction cannot be regressed.
                     if(canonicalJSON(now)!==canonicalJSON(before) && canonicalJSON(now)!==canonicalJSON(proposed))throw Error('This question was corrected in another window. Reload to merge the latest answers.');
                     changes.push({id:q.id,userAns:proposed.userAns,isCorrect:proposed.isCorrect,isCorrected:proposed.isCorrect===true});
                 }
-                saved.details=saved.details.map(d=>({...d,...(changes.find(c=>c.id===d.id)||{})}));
+                saved.correctionDetails=[...(saved.correctionDetails || []).filter(d=>!changes.some(c=>c.id===d.id)),...changes];
                 saved.correctedAt=recordData.correctedAt;
                 saved.needsCorrection=recordDetails(saved).some(d=>!d.isCorrect);
-                transaction.update(ref,{details:saved.details,correctedAt:saved.correctedAt,needsCorrection:saved.needsCorrection});
+                transaction.update(ref,{correctionDetails:saved.correctionDetails,correctedAt:saved.correctedAt,needsCorrection:saved.needsCorrection});
                 return {...saved,recordId:recordData.recordId};
             }
             if(existing.exists() && !existing.data().answerDataUnavailable)return {...existing.data(),recordId:recordData.recordId};
@@ -1398,7 +1398,13 @@
     const unitKey = (book, unit) => `B${book}U${String(unit).padStart(2,'0')}`;
     const unitLabel = (book, unit) => `Book${book} / Unit${String(unit).padStart(2,'0')}`;
     const recordLabel = r => r.book && r.unit ? unitLabel(r.book,r.unit) : 'Legacy exam';
-    const recordDetails = r => Array.isArray(r?.details) ? r.details.filter(d => d && typeof d === 'object') : [];
+    const recordDetails = r => {
+        const original=Array.isArray(r?.details) ? r.details.filter(d=>d && typeof d==='object') : [];
+        return original.map(d=>{
+            const correction=Array.isArray(r?.correctionDetails) ? r.correctionDetails.find(c=>c && c.id===d.id) : null;
+            return correction ? {...d,userAns:correction.userAns,isCorrect:correction.isCorrect,isCorrected:correction.isCorrect===true,originalUserAns:d.userAns} : d;
+        });
+    };
     const recordTime = r => typeof r.submittedAt === 'string' ? r.submittedAt : typeof r.date === 'string' ? r.date : '';
     const isMine = r => normalizeLoginValue(r.studentName) === normalizeLoginValue(currentUser) && getStudentHR(r.studentName,r.studentHR) === currentUserHR;
     function isDue(state, now=Date.now()) {
@@ -2282,7 +2288,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                             ${d.isCorrect ? '✓ Correct' : '✗ Incorrect'} (${escapeHTML(d.isCorrect ? d.points : 0)}/${escapeHTML(d.points)} Pts)
                         </span>
                     </div>
-                    <div>Student Answer: <strong>${escapeHTML(d.userAns)}</strong> | Correct Answer: <strong>${escapeHTML(d.correctAns)}</strong></div>
+                    <div>${d.originalUserAns!==undefined ? `Original Answer: <strong>${escapeHTML(d.originalUserAns)}</strong><br>Correction Answer:` : 'Student Answer:'} <strong>${escapeHTML(d.userAns)}</strong> | Correct Answer: <strong>${escapeHTML(d.correctAns)}</strong></div>
                 </div>
             `).join('');
 
@@ -2963,9 +2969,9 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
 
             let recordsHtml = matchedRecords.map((rec, idx) => {
                 const isPerfectScore = Number(rec.totalPossible) > 0 && Number(rec.score) === Number(rec.totalPossible);
-                const isFullyCorrected = rec.details && !rec.details.some(d => !d.isCorrect);
+                const isFullyCorrected = recordDetails(rec).length>0 && !recordDetails(rec).some(d => !d.isCorrect);
 
-                let detailsHtml = (rec.details || []).map(d => `
+                let detailsHtml = recordDetails(rec).map(d => `
                     <div class="result-card ${d.isCorrect ? 'correct' : 'incorrect'}" style="margin-top: 6px; font-size: 0.85rem;">
                         <div class="res-header">
                             <span>Q${escapeHTML(d.id)}. ${escapeHTML(d.stem)} ${d.isCorrected ? '<span class="badge-corrected">Corrected</span>' : ''}</span>
@@ -2973,7 +2979,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                                 ${d.isCorrect ? '✓ Correct' : '✗ Incorrect'} (${escapeHTML(d.isCorrect ? d.points : 0)}/${escapeHTML(d.points)} Pts)
                             </span>
                         </div>
-                        <div>Student Answer: <strong>${escapeHTML(d.userAns)}</strong> | Correct Answer: <strong>${escapeHTML(d.correctAns)}</strong></div>
+                        <div>${d.originalUserAns!==undefined ? `Original Answer: <strong>${escapeHTML(d.originalUserAns)}</strong><br>Correction Answer:` : 'Student Answer:'} <strong>${escapeHTML(d.userAns)}</strong> | Correct Answer: <strong>${escapeHTML(d.correctAns)}</strong></div>
                     </div>
                 `).join('');
 
@@ -3245,7 +3251,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         document.getElementById('final-score').innerText = `Initial Score: ${studentRecord.score} / ${studentRecord.totalPossible} Points`;
 
         let resultListHtml = `<p>Submission reason: ${submissionReasonLabel(studentRecord.submissionReason, attemptDurationMinutes(studentRecord))}</p>`;
-        (studentRecord.details || []).forEach(d => {
+        recordDetails(studentRecord).forEach(d => {
             resultListHtml += `
                 <div class="result-card ${d.isCorrect ? 'correct' : 'incorrect'}">
                     <div class="res-header">
@@ -3256,7 +3262,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                     </div>
                     <div style="margin-bottom: 8px;">${escapeHTML(d.stem)}</div>
                     <div style="font-size: 0.95rem; color: var(--text-muted);">
-                        Your Answer: <strong>${escapeHTML(d.userAns || 'No Answer')}</strong> | Correct Answer: <strong>${escapeHTML(d.correctAns)}</strong>
+                        ${d.originalUserAns!==undefined ? `Original Answer: <strong>${escapeHTML(d.originalUserAns || 'No Answer')}</strong><br>Correction Answer:` : 'Your Answer:'} <strong>${escapeHTML(d.userAns || 'No Answer')}</strong> | Correct Answer: <strong>${escapeHTML(d.correctAns)}</strong>
                     </div>
                 </div>
             `;
@@ -3310,9 +3316,9 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
             activeRecord.questionSnapshot=cloneExamData(exam.questions);activeRecord.sectionDefs=cloneExamData(exam.sectionDefs||{});
             if(isCorrection && !activeRecord) throw new Error('Correction record unavailable.');
             currentExamData=exam; sectionDefs=exam.sectionDefs || {}; isCorrectionMode=isCorrection;
-            questions=isCorrection ? exam.questions.filter(q=>activeRecord.details.some(d=>d.id===q.id && !d.isCorrect)) : exam.questions;
+            questions=isCorrection ? exam.questions.filter(q=>recordDetails(activeRecord).some(d=>d.id===q.id && !d.isCorrect)) : exam.questions;
             if(!questions.length) throw new Error('No questions available.');
-            if(isCorrection && activeRecord.details.filter(d=>!d.isCorrect).some(d=>!questions.some(q=>q.id===d.id && q.stem===d.stem && q.answer===d.correctAns))) throw new Error('The question file has changed; contact Administrator before correcting.');
+            if(isCorrection && recordDetails(activeRecord).filter(d=>!d.isCorrect).some(d=>!questions.some(q=>q.id===d.id && q.stem===d.stem && q.answer===d.correctAns))) throw new Error('The question file has changed; contact Administrator before correcting.');
             currentIndex=0;userAnswers={};draftRevision=0;draftBlocked=false;lastSectionType=null;isExamActive=true;
             if(!isCorrection)await restoreAttemptDraft(admission.resuming===true);
             correctionBase=isCorrection?cloneExamData(activeRecord):null;
@@ -3884,20 +3890,12 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
 
 
         if (isCorrectionMode && studentRecord.details && studentRecord.details.length > 0) {
-            questions.forEach(q => {
-                let uAns = (userAnswers[q.id] || '').trim();
-                let cAns = (q.answer || '').trim();
-                let isCorrect = checkAnswer(q.type, uAns, cAns);
-
-                let detailItem = studentRecord.details.find(d => d.id === q.id);
-                if (detailItem) {
-                    detailItem.userAns = uAns || 'No Answer';
-                    detailItem.isCorrect = isCorrect;
-                    if (isCorrect) {
-                        detailItem.isCorrected = true;
-                    }
-                }
+            const changes=questions.map(q=>{
+                const userAns=(userAnswers[q.id] || '').trim();
+                const isCorrect=checkAnswer(q.type,userAns,(q.answer || '').trim());
+                return {id:q.id,userAns:userAns || 'No Answer',isCorrect,isCorrected:isCorrect};
             });
+            studentRecord.correctionDetails=[...(studentRecord.correctionDetails || []).filter(d=>!changes.some(c=>c.id===d.id)),...changes];
         } else {
             let totalEarned = 0;
             let totalPossible = 0;
@@ -3951,7 +3949,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         } finally {savingResult=false;}
 
         savePageSession();
-        const remainingWrong = (studentRecord.details || []).filter(d => !d.isCorrect).length;
+        const remainingWrong = recordDetails(studentRecord).filter(d => !d.isCorrect).length;
 
         document.getElementById('result-status-title').innerText = isCorrectionMode ? "Correction Result" : "Test Completed!";
         document.getElementById('result-student-name').innerText = `Student: ${studentDisplayName(currentUser,currentUserHR)} (${targetDate}) · ${recordLabel(studentRecord)}`;
@@ -3964,7 +3962,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
         `;
 
         let resultListHtml = `<p>Submission reason: ${submissionReasonLabel(studentRecord.submissionReason, attemptDurationMinutes(studentRecord))}</p>`;
-        (studentRecord.details || []).forEach(d => {
+        recordDetails(studentRecord).forEach(d => {
             resultListHtml += `
                 <div class="result-card ${d.isCorrect ? 'correct' : 'incorrect'}">
                     <div class="res-header">
@@ -3975,7 +3973,7 @@ function studentUnitPresentation(state,student,records,states,attempts=[],now=Da
                     </div>
                     <div style="margin-bottom: 8px;">${escapeHTML(d.stem)}</div>
                     <div style="font-size: 0.95rem; color: var(--text-muted);">
-                        Your Answer: <strong>${escapeHTML(d.userAns || 'No Answer')}</strong> | Correct Answer: <strong>${escapeHTML(d.correctAns)}</strong>
+                        ${d.originalUserAns!==undefined ? `Original Answer: <strong>${escapeHTML(d.originalUserAns || 'No Answer')}</strong><br>Correction Answer:` : 'Your Answer:'} <strong>${escapeHTML(d.userAns || 'No Answer')}</strong> | Correct Answer: <strong>${escapeHTML(d.correctAns)}</strong>
                     </div>
                 </div>
             `;
